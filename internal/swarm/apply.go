@@ -887,7 +887,8 @@ func (a *Applier) Prune(ctx context.Context, last *Result, removed bool) ([]Chan
 	return changes, nil
 }
 
-// Wait waits for each service in ids to converge.
+// Wait waits for each service in ids to converge, and each job to
+// complete.
 func (a *Applier) Wait(ctx context.Context, ids map[string]string, timeout time.Duration) error {
 	if a.DryRun {
 		return nil
@@ -903,7 +904,11 @@ func (a *Applier) Wait(ctx context.Context, ids map[string]string, timeout time.
 		if left <= 0 {
 			return fmt.Errorf("timeout waiting for services")
 		}
-		if err := tfdocker.WaitForService(ctx, a.Client, ids[n], left, 2*time.Second); err != nil {
+		id := ids[n]
+		err := WaitHealthy(ctx, left, 2*time.Second, func(ctx context.Context) (Health, error) {
+			return CheckService(ctx, a.Client, id)
+		})
+		if err != nil {
 			return fmt.Errorf("service %s: %w", n, err)
 		}
 	}
