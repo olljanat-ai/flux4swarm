@@ -50,6 +50,9 @@ const (
 	// AnnotationServiceSpec is a JSON merge patch (RFC 7386) applied to the
 	// generated Docker ServiceSpec.
 	AnnotationServiceSpec = "swarm.flux4swarm.io/service-spec"
+	// AnnotationContainer names the container of a multi-container pod
+	// that runs on Swarm (default: the first); the others are ignored.
+	AnnotationContainer = "swarm.flux4swarm.io/container"
 	// AnnotationIgnore skips an object on Swarm when "true".
 	AnnotationIgnore = "swarm.flux4swarm.io/ignore"
 	// AnnotationVolumeDriver and AnnotationVolumeOptions configure the

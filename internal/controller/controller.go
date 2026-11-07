@@ -44,6 +44,9 @@ type Options struct {
 	DryRun       bool
 	// Diff records a unified diff in each change (implies DryRun).
 	Diff bool
+	// Strict fails a Kustomization whose build has warnings (Kubernetes
+	// features that were dropped on Swarm) instead of applying it.
+	Strict bool
 	// APIToken, when set, is the bearer token POST endpoints require.
 	APIToken string
 	Log      *slog.Logger
@@ -650,8 +653,19 @@ func (c *Controller) reconcileKustomization(ctx context.Context, key string, onc
 		c.mu.Unlock()
 		return
 	}
-	for _, w := range out.Warnings {
+	warnings := out.Warnings
+	if !obj.Spec.Wait && len(obj.Spec.HealthChecks) > 0 {
+		warnings = append(warnings, skippedHealthChecks(obj)...)
+	}
+	for _, w := range warnings {
 		log.Warn(w)
+	}
+	if c.opts.Strict && len(warnings) > 0 {
+		c.mu.Lock()
+		s.status.Warnings = warnings
+		fail(ReasonBuildFailed, fmt.Errorf("strict mode: %d warning(s): %s", len(warnings), strings.Join(warnings, "; ")))
+		c.mu.Unlock()
+		return
 	}
 	workloads := map[string]string{}
 	for _, w := range translate.Workloads(set) {
@@ -734,7 +748,7 @@ func (c *Controller) reconcileKustomization(ctx context.Context, key string, onc
 	s.status.LastAppliedRevision = art.Revision
 	s.status.Inventory = res.Inventory
 	s.status.LastChanges = changes
-	s.status.Warnings = out.Warnings
+	s.status.Warnings = warnings
 	s.status.Ignored = len(set.Ignored)
 	s.status.Skipped = set.Ignored
 	for _, ig := range set.Ignored {

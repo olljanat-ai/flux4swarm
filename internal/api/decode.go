@@ -55,6 +55,11 @@ type Set struct {
 	HTTPRoutes  []*gatewayv1.HTTPRoute
 	Middlewares []*TraefikMiddleware
 
+	// Autoscalers and Flagger Canaries are skipped but change how their
+	// target is translated.
+	Scalers  []Scaler
+	Canaries []Canary
+
 	// Ignored lists the objects that are not applied to Swarm, and why.
 	Ignored []IgnoredObject
 }
@@ -248,7 +253,10 @@ func (s *Set) decodeOne(doc []byte, defNS string) error {
 			return err
 		}
 		if _, sops := o.Data["sops"]; sops || strings.Contains(string(doc), "\nsops:") {
-			return fmt.Errorf("secret %s/%s is SOPS encrypted; SOPS is not supported on Swarm, use an ExternalSecret", ns, o.Name)
+			// Kubernetes may decrypt it; a Swarm workload that needs it
+			// fails with "secret not found".
+			s.ignore(id, IgnoredSOPS)
+			return nil
 		}
 		o.Namespace = ns
 		for k, v := range o.StringData {
@@ -302,6 +310,20 @@ func (s *Set) decodeOne(doc []byte, defNS string) error {
 		}
 		o.Metadata.Namespace = ns
 		s.Middlewares = append(s.Middlewares, o)
+	case (group == "autoscaling" && h.Kind == KindHPA) || (group == "keda.sh" && h.Kind == KindScaledObject):
+		sc, err := decodeScaler(id, ns, h.Kind, dec)
+		if err != nil {
+			return err
+		}
+		s.Scalers = append(s.Scalers, sc)
+		s.ignore(id, IgnoredAutoscaler)
+	case group == "flagger.app" && h.Kind == KindCanary:
+		c, err := decodeCanary(id, ns, dec)
+		if err != nil {
+			return err
+		}
+		s.Canaries = append(s.Canaries, c)
+		s.ignore(id, IgnoredCanary)
 	default:
 		s.ignore(id, IgnoredUnsupported)
 	}

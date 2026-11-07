@@ -94,7 +94,7 @@ func TestHealthChecks(t *testing.T) {
 		{name: "missing service", checks: []api.CrossNamespaceObjectReference{ref("batch/v1", "Job", "demo", "gone")}, wantErr: "service not found"},
 		{name: "kustomization not ready", checks: []api.CrossNamespaceObjectReference{ref(api.KustomizeGroupVersion, api.KindKustomization, "", "broken")}, wantErr: "boom"},
 		{name: "kustomization missing", checks: []api.CrossNamespaceObjectReference{ref(api.KustomizeGroupVersion, api.KindKustomization, "", "nope")}, wantErr: "not found"},
-		{name: "unsupported flux kind", checks: []api.CrossNamespaceObjectReference{ref("helm.toolkit.fluxcd.io/v2", "HelmRelease", "demo", "x")}, wantErr: "not supported"},
+		{name: "flux kind swarm does not run is skipped", checks: []api.CrossNamespaceObjectReference{ref("helm.toolkit.fluxcd.io/v2", "HelmRelease", "demo", "x")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			k := ks("app", "db")
@@ -143,5 +143,18 @@ func TestDependenciesNotReady(t *testing.T) {
 	c.mu.Unlock()
 	if !strings.Contains(got, "not found") {
 		t.Errorf("missing dependency: %q", got)
+	}
+}
+
+func TestSkippedHealthChecks(t *testing.T) {
+	k := ks("app", "db")
+	k.Spec.HealthChecks = []api.CrossNamespaceObjectReference{
+		{APIVersion: "helm.toolkit.fluxcd.io/v2", Kind: "HelmRelease", Name: "x"},
+		{APIVersion: api.KustomizeGroupVersion, Kind: api.KindKustomization, Name: "db"},
+		{APIVersion: "apps/v1", Kind: "Deployment", Name: "web"},
+	}
+	got := skippedHealthChecks(k)
+	if len(got) != 1 || !strings.Contains(got[0], "HelmRelease/") || !strings.Contains(got[0], "skipped") {
+		t.Errorf("got %v", got)
 	}
 }

@@ -86,9 +86,9 @@ func (c *Controller) healthChecks(ctx context.Context, key string, ks *api.Kusto
 			if msg := c.fluxObjectNotReady(key, ref.Kind, ns, ref.Name); msg != "" {
 				notReady = append(notReady, id+": "+msg)
 			}
-		case strings.HasSuffix(group, ".fluxcd.io"):
-			return fmt.Errorf("health check %s: kind %s is not supported on Swarm", id, ref.Kind)
 		}
+		// Anything else (HelmRelease, custom resources) is not applied to
+		// Swarm; skippedHealthChecks reports it as a warning.
 	}
 	if len(notReady) > 0 {
 		return errors.New("health check failed: " + strings.Join(notReady, "; "))
@@ -108,6 +108,25 @@ func (c *Controller) healthChecks(ctx context.Context, key string, ks *api.Kusto
 		}
 	}
 	return nil
+}
+
+// skippedHealthChecks lists warnings for the health checks of ks that
+// name Flux kinds Swarm does not run, such as HelmRelease. Like the objects
+// themselves they are skipped instead of failing the Kustomization.
+func skippedHealthChecks(ks *api.Kustomization) []string {
+	var out []string
+	for _, ref := range ks.Spec.HealthChecks {
+		group, _, _ := strings.Cut(ref.APIVersion, "/")
+		if !strings.HasSuffix(group, ".fluxcd.io") || ref.Kind == api.KindKustomization || ref.Kind == api.KindGitRepository {
+			continue
+		}
+		ns := ref.Namespace
+		if ns == "" {
+			ns = ks.Metadata.Namespace
+		}
+		out = append(out, fmt.Sprintf("health check %s/%s/%s: kind %s is not supported on Swarm and was skipped", ref.Kind, ns, ref.Name, ref.Kind))
+	}
+	return out
 }
 
 // serviceFor returns the Swarm service name of a workload: from this

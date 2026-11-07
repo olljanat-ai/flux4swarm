@@ -39,9 +39,18 @@ func TestTranslateErrors(t *testing.T) {
 		yaml string
 		want string
 	}{
-		"two containers": {
-			yaml: deployment("a", "default", "      containers: [{name: a, image: a}, {name: b, image: b}]"),
-			want: "pods with 2 containers",
+		"container annotation names no container": {
+			yaml: `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: a
+  namespace: default
+  annotations: {swarm.flux4swarm.io/container: nope}
+spec:
+  selector: {matchLabels: {app: a}}
+  template: {metadata: {labels: {app: a}}, spec: {containers: [{name: a, image: a}, {name: b, image: b}]}}
+`,
+			want: `annotation swarm.flux4swarm.io/container: container "nope" not found`,
 		},
 		"missing envFrom configMap": {
 			yaml: deployment("a", "default", "      containers: [{name: a, image: a, envFrom: [{configMapRef: {name: nope}}]}]"),
@@ -54,11 +63,6 @@ func TestTranslateErrors(t *testing.T) {
 		"mount without volume": {
 			yaml: deployment("a", "default", "      containers: [{name: a, image: a, volumeMounts: [{name: v, mountPath: /v}]}]"),
 			want: `volumeMount "v" has no volume`,
-		},
-		"unsupported volume": {
-			yaml: deployment("a", "default", `      containers: [{name: a, image: a, volumeMounts: [{name: v, mountPath: /v}]}]
-      volumes: [{name: v, nfs: {server: s, path: /p}}]`),
-			want: `volume "v": only configMap`,
 		},
 		"configMap item key missing": {
 			yaml: "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: c, namespace: default}\ndata: {a: b}\n---\n" +

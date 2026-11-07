@@ -30,7 +30,12 @@ complete mapping.
 
 A typical migration: import once with `--bootstrap`, review the commit,
 start the controller on the Swarm, and point Flux on Kubernetes at the same
-repository (`flux bootstrap` adds `gotk-components.yaml`).
+repository (`flux bootstrap` adds `gotk-components.yaml`). Kubernetes-only
+features (sidecars, httpGet probes, autoscalers, canaries, HelmReleases, ...)
+never fail the Swarm side: they are skipped with a warning, so new
+Kubernetes work can start while Swarm is still live. See
+[docs/kubernetes-and-swarm.md](docs/kubernetes-and-swarm.md) for the policy
+and a repository layout for the migration.
 
 ## Install
 
@@ -299,11 +304,16 @@ types `generic`, `generic-hmac`, `slack`, `msteams`, `github`,
 Swarm-only settings are annotations on the workload, which Flux ignores:
 `swarm.flux4swarm.io/name`, `swarm.flux4swarm.io/networks`,
 `swarm.flux4swarm.io/service-spec` (JSON merge patch on the Docker
-ServiceSpec) and `swarm.flux4swarm.io/ignore`. Flux components
-(`app.kubernetes.io/part-of: flux`) and kinds with no Swarm meaning
-(RBAC, Ingress, CRDs, HPA, ...) are skipped; each skipped object and the
-reason is listed under `skipped` in `/status` and in `reconcile` and `diff`
-output.
+ServiceSpec), `swarm.flux4swarm.io/container` (the container of a
+multi-container pod that runs) and `swarm.flux4swarm.io/ignore`. Flux
+components (`app.kubernetes.io/part-of: flux`) and kinds with no Swarm
+meaning (RBAC, Ingress, CRDs, HPA, ...) are skipped; each skipped object and
+the reason is listed under `skipped` in `/status` and in `reconcile` and
+`diff` output. Fields Swarm cannot run are dropped and listed under
+`warnings`; `--strict` makes them fail the Kustomization instead. Flagger
+Canary targets roll back a failed update and autoscaled workloads run
+`minReplicas`
+([details](docs/kubernetes-and-swarm.md)).
 
 ## Git authentication
 
@@ -324,12 +334,13 @@ The most Flux compatible option was chosen wherever Swarm differs:
   `kustomization.yaml`, `targetNamespace`, `namePrefix/Suffix`, `patches`,
   `images`, `components`, `commonMetadata` and `postBuild.substitute`.
   `postBuild.substituteFrom` reads directories in the credentials directory.
-* SOPS decryption is not supported; use ExternalSecrets.
+* SOPS decryption is not supported; SOPS encrypted Secrets are skipped, use
+  ExternalSecrets.
 * Docker configs and secrets are immutable, so they are versioned
   (`<name>-<hash>`) and services roll when content changes.
 * `provider: azure` uses a service principal instead of workload identity.
-* Pods with more than one container cannot be one Swarm service and are
-  rejected (annotate them with `swarm.flux4swarm.io/ignore: "true"`).
+* Pods with more than one container cannot be one Swarm service: only the
+  main container runs (`swarm.flux4swarm.io/container`, else the first).
 
 ## License
 
