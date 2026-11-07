@@ -113,7 +113,21 @@ clusters/prod/
 ```
 
 Docker never returns secret values, so put each secret into the store under
-the key in its ExternalSecret `remoteRef.key`. Everything that has no
+the key in its ExternalSecret `remoteRef.key`. Env values, however, are
+returned as they are, so a `DB_PASSWORD` from `docker stack deploy` would
+end up in Git. Import therefore moves env vars whose name contains a
+well-known secret word (case-insensitive: `PASSWORD`, `PASSWD`, `SECRET`,
+`TOKEN`, `API_KEY`, `APIKEY`, `ACCESS_KEY`, `PRIVATE_KEY`, `CREDENTIAL`,
+`CONNECTION_STRING`, `CONNECTIONSTRING`) into one ExternalSecret per service,
+`externalsecret-<service>-env.yaml`, with the remote key
+`<prefix><swarm service name>-<ENV_NAME>`, and the Deployment uses
+`valueFrom.secretKeyRef`. A note lists each converted variable and key; put
+the current value into the store. Names ending in `_FILE`, `_PATH` or `_DIR`
+(`MYSQL_PASSWORD_FILE=/run/secrets/db`), empty values and Swarm templates stay
+plain. Add your own name parts with `--secret-env-name LICENSE` (repeatable)
+or turn the built-in list off with `--no-default-secret-env-names`. Only
+names are matched; values are not inspected, so a secret under another name
+is still exported as is. Everything that has no
 Kubernetes equivalent (update policies, extra labels, placement preferences,
 ...) is kept in the `swarm.flux4swarm.io/service-spec` annotation, so
 reconciling the export gives the same Swarm services back. `--adopt` keeps
