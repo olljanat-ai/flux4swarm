@@ -18,7 +18,6 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -548,11 +547,18 @@ func newImportCmd() *cobra.Command {
 		credsDir string
 
 		adoptOwner string
+		watch      bool
+		interval   time.Duration
+		debounce   time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   "import",
 		Short: "Export Swarm services, configs, secrets and volumes as Flux/Kubernetes manifests to a directory or Git",
-		Args:  cobra.NoArgs,
+		Long: "Export the Swarm once, or with --watch keep exporting it: Swarm stays the\n" +
+			"source of truth and Flux on Kubernetes follows the commits. In watch mode\n" +
+			"the export owns only <path>/apps; files elsewhere (flux-system/, your own\n" +
+			"overlays and patches) are created once when missing and never overwritten.",
+		Args: cobra.NoArgs,
 	}
 	gf.register(cmd, "git-url")
 	cmd.Flags().StringVar(&o.Cluster, "cluster", "default", "cluster name (writes clusters/<cluster>)")
@@ -570,6 +576,9 @@ func newImportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&author, "author", "flux4swarm", "commit author name")
 	cmd.Flags().StringVar(&email, "author-email", "flux4swarm@users.noreply.github.com", "commit author email")
 	cmd.Flags().StringVar(&credsDir, "credentials-dir", creds.DefaultDir, "directory with the --git-secret credentials")
+	cmd.Flags().BoolVar(&watch, "watch", false, "keep running: export again after every Swarm service, config or secret change and every --interval, and commit only when the export differs (Swarm stays the source of truth)")
+	cmd.Flags().DurationVar(&interval, "interval", 10*time.Minute, "with --watch: full resync period")
+	cmd.Flags().DurationVar(&debounce, "debounce", 5*time.Second, "with --watch: wait this long after a Swarm change before exporting, so one stack deploy gives one commit")
 
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
 		ctx := cmd.Context()
@@ -592,65 +601,90 @@ func newImportCmd() *cobra.Command {
 			return err
 		}
 		defer dc.Close()
-		res, err := importer.Export(ctx, dc, o)
-		if err != nil {
-			return err
+		store := creds.New(credsDir)
+		secretName := gf.apply(store)
+		var secret map[string][]byte
+		if secretName != "" {
+			secret = store.Lookup(secretName, git.SecretKeys...)
 		}
-		write := func(root string) error {
-			for _, c := range res.Clean {
-				if err := os.RemoveAll(filepath.Join(root, filepath.FromSlash(c))); err != nil {
-					return err
+		// export writes the Swarm to --output or Git. In watch mode files
+		// outside the apps directory are only created, never overwritten.
+		export := func(ctx context.Context) (*importer.Result, error) {
+			res, err := importer.Export(ctx, dc, o)
+			if err != nil {
+				return nil, err
+			}
+			if output != "" {
+				if err := res.WriteTo(output, watch); err != nil {
+					return nil, err
 				}
+				fmt.Printf("wrote %d files to %s\n", len(res.Files), filepath.Join(output, res.Root))
+				return res, nil
 			}
-			var names []string
-			for f := range res.Files {
-				names = append(names, f)
-			}
-			sort.Strings(names)
-			for _, f := range names {
-				p := filepath.Join(root, filepath.FromSlash(f))
-				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-					return err
+			msg := message
+			if msg == "" {
+				msg = "Import Docker Swarm state into " + res.Root
+				if watch {
+					msg = "Sync Docker Swarm state into " + res.Root
 				}
-				if err := os.WriteFile(p, res.Files[f], 0o644); err != nil {
-					return err
-				}
-			}
-			return nil
-		}
-		if output != "" {
-			if err := write(output); err != nil {
-				return err
-			}
-			fmt.Printf("wrote %d files to %s\n", len(res.Files), filepath.Join(output, res.Root))
-		} else {
-			store := creds.New(credsDir)
-			secretName := gf.apply(store)
-			var secret map[string][]byte
-			if secretName != "" {
-				secret = store.Lookup(secretName, git.SecretKeys...)
-			}
-			if message == "" {
-				message = "Import Docker Swarm state into " + res.Root
 			}
 			work, err := os.MkdirTemp("", "flux4swarm-import-")
 			if err != nil {
-				return err
+				return nil, err
 			}
 			defer os.RemoveAll(work)
 			pr, err := git.CommitAndPush(ctx, filepath.Join(work, "repo"), git.PushOptions{
-				URL: gf.url, Branch: gf.branch, Message: message, Author: author, Email: email,
+				URL: gf.url, Branch: gf.branch, Message: msg, Author: author, Email: email,
 				Auth:  &git.AuthProvider{Provider: gf.provider, URL: gf.url, Secret: secret},
-				Write: write,
+				Write: func(root string) error { return res.WriteTo(root, watch) },
 			})
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if pr.Changed {
 				fmt.Printf("pushed %d files to %s (%s) commit %s\n", len(res.Files), gf.url, gf.branch, pr.Commit)
 			} else {
 				fmt.Printf("no changes; %s (%s) is up to date\n", gf.url, gf.branch)
 			}
+			return res, nil
+		}
+		if watch {
+			if o.Adopt {
+				return fmt.Errorf("--adopt hands the Swarm over to the controller; it cannot be combined with --watch, where Swarm stays the source of truth")
+			}
+			ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			var last string
+			slog.Info("watching Swarm", "path", o.Path, "interval", interval, "debounce", debounce)
+			return importer.Watch(ctx, dc, importer.WatchOptions{Interval: interval, Debounce: debounce, Log: slog.Default()},
+				func(ctx context.Context, full bool) error {
+					// Cheap check first: the export is deterministic, so an
+					// unchanged hash means Git is already up to date, unless
+					// someone edited it (the periodic full resync repairs that).
+					if !full {
+						res, err := importer.Export(ctx, dc, o)
+						if err != nil {
+							return err
+						}
+						if res.Hash() == last {
+							slog.Debug("export unchanged")
+							return nil
+						}
+					}
+					res, err := export(ctx)
+					if err != nil {
+						return err
+					}
+					last = res.Hash()
+					for _, sk := range res.Skipped {
+						slog.Debug("skipped", "object", sk.String())
+					}
+					return nil
+				})
+		}
+		res, err := export(ctx)
+		if err != nil {
+			return err
 		}
 		if o.Adopt && res.Desired != nil {
 			// Label the services the export reproduces exactly as owned by
