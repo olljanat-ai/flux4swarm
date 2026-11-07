@@ -1,0 +1,167 @@
+{
+  "warnings": [
+    "DaemonSet monitoring/agent: privileged containers are not supported by Swarm services"
+  ],
+  "networks": [
+    {
+      "name": "monitoring_default",
+      "labels": {
+        "com.docker.stack.namespace": "monitoring"
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "monitoring_agent",
+      "spec": {
+        "Name": "monitoring_agent",
+        "Labels": {
+          "com.docker.stack.namespace": "monitoring"
+        },
+        "TaskTemplate": {
+          "ContainerSpec": {
+            "Image": "example.com/agent:1",
+            "Labels": {
+              "com.docker.stack.namespace": "monitoring"
+            }
+          },
+          "Networks": [
+            {
+              "Target": "monitoring_default"
+            }
+          ],
+          "ForceUpdate": 0
+        },
+        "Mode": {
+          "Global": {}
+        }
+      }
+    },
+    {
+      "name": "monitoring_migrate",
+      "spec": {
+        "Name": "monitoring_migrate",
+        "Labels": {
+          "com.docker.stack.namespace": "monitoring"
+        },
+        "TaskTemplate": {
+          "ContainerSpec": {
+            "Image": "example.com/migrate:1",
+            "Labels": {
+              "com.docker.stack.namespace": "monitoring"
+            }
+          },
+          "RestartPolicy": {
+            "Condition": "on-failure",
+            "MaxAttempts": 4
+          },
+          "Networks": [
+            {
+              "Target": "monitoring_default"
+            }
+          ],
+          "ForceUpdate": 0
+        },
+        "Mode": {
+          "ReplicatedJob": {
+            "MaxConcurrent": 2,
+            "TotalCompletions": 3
+          }
+        }
+      }
+    },
+    {
+      "name": "monitoring_nosurge",
+      "spec": {
+        "Name": "monitoring_nosurge",
+        "Labels": {
+          "com.docker.stack.namespace": "monitoring"
+        },
+        "TaskTemplate": {
+          "ContainerSpec": {
+            "Image": "example.com/nosurge:1",
+            "Labels": {
+              "com.docker.stack.namespace": "monitoring"
+            }
+          },
+          "Networks": [
+            {
+              "Target": "monitoring_default"
+            }
+          ],
+          "ForceUpdate": 0
+        },
+        "Mode": {
+          "Replicated": {
+            "Replicas": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "monitoring_once",
+      "spec": {
+        "Name": "monitoring_once",
+        "Labels": {
+          "com.docker.stack.namespace": "monitoring"
+        },
+        "TaskTemplate": {
+          "ContainerSpec": {
+            "Image": "example.com/once:1",
+            "Labels": {
+              "com.docker.stack.namespace": "monitoring"
+            }
+          },
+          "RestartPolicy": {
+            "Condition": "none"
+          },
+          "Networks": [
+            {
+              "Target": "monitoring_default"
+            }
+          ],
+          "ForceUpdate": 0
+        },
+        "Mode": {
+          "ReplicatedJob": {
+            "MaxConcurrent": 1,
+            "TotalCompletions": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "monitoring_singleton",
+      "spec": {
+        "Name": "monitoring_singleton",
+        "Labels": {
+          "com.docker.stack.namespace": "monitoring"
+        },
+        "TaskTemplate": {
+          "ContainerSpec": {
+            "Image": "example.com/singleton:1",
+            "Labels": {
+              "com.docker.stack.namespace": "monitoring"
+            }
+          },
+          "Networks": [
+            {
+              "Target": "monitoring_default"
+            }
+          ],
+          "ForceUpdate": 0
+        },
+        "Mode": {
+          "Replicated": {
+            "Replicas": 1
+          }
+        },
+        "UpdateConfig": {
+          "Parallelism": 0,
+          "MaxFailureRatio": 0,
+          "Order": "stop-first"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+# Service modes: a DaemonSet (global), Jobs (replicated-job) and a
+# Deployment with the Recreate strategy.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: agent, namespace: monitoring}
+spec:
+  selector: {matchLabels: {app: agent}}
+  template:
+    metadata: {labels: {app: agent}}
+    spec:
+      containers:
+        - name: agent
+          image: example.com/agent:1
+          securityContext: {privileged: true}
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: migrate, namespace: monitoring}
+spec:
+  completions: 3
+  parallelism: 2
+  backoffLimit: 4
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers: [{name: migrate, image: example.com/migrate:1}]
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: once, namespace: monitoring}
+spec:
+  backoffLimit: 4
+  template:
+    spec:
+      restartPolicy: Never
+      containers: [{name: once, image: example.com/once:1}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: singleton, namespace: monitoring}
+spec:
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: singleton}}
+  template:
+    metadata: {labels: {app: singleton}}
+    spec:
+      containers: [{name: s, image: example.com/singleton:1}]
+---
+# maxSurge 0: the Swarm default update order applies.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: nosurge, namespace: monitoring}
+spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 0}
+  selector: {matchLabels: {app: nosurge}}
+  template:
+    metadata: {labels: {app: nosurge}}
+    spec:
+      containers: [{name: s, image: example.com/nosurge:1}]
