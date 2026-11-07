@@ -126,13 +126,33 @@ from the secret store. Import prints every Swarm object it did not export
 (`skipped: Service/tmp_debug (matches --exclude)`), so nothing is dropped
 silently.
 
+### Migration readiness report
+
+Every export also writes `clusters/<cluster>/MIGRATION.md`: per service, a
+checklist of what stands between it and Kubernetes. **Blockers** must change
+first: bind mounts (hostPath), the Docker socket, ports published in host
+mode, placement constraints with no nodeSelector equivalent, and environment
+variables that look like plain text credentials (`*_PASSWORD`, `*_TOKEN`,
+URLs with a password; values are never written to the report). **Checks**
+work after the move but need a decision on the cluster: load balancers for
+published ports, node labels, storage classes for volume drivers, log
+drivers, attached networks, and Swarm-only settings that Kubernetes ignores.
+The file has no timestamps, so with `--watch` it changes only when the Swarm
+does, and the Git history shows the checklist shrinking. For a one-shot run
+without writing anything:
+
+```sh
+flux4swarm migration-report --cluster prod            # Markdown to stdout
+flux4swarm migration-report --json --fail-on-blockers # for CI; exit 2 while blockers remain
+```
+
 ### Keep exporting (Swarm stays the source of truth)
 
 `import --watch` keeps running: it exports again after every Swarm service,
 config or secret event (after `--debounce`, default 5s, so one `docker stack
 deploy` gives one commit) and every `--interval` (default 10m), and commits
 only when the export differs. Swarm is never changed (`--adopt` is refused).
-The export owns `clusters/<cluster>/apps/` and rewrites it every time; files
+The export owns `clusters/<cluster>/apps/` and `MIGRATION.md` and rewrites them every time; files
 anywhere else, such as `flux-system/` or the platform team's overlays and
 patches, are created once when missing and then left alone. That is how
 Kubernetes-only features are added on top, see

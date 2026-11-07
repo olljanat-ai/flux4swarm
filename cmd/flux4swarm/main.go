@@ -146,7 +146,7 @@ func newRoot() *cobra.Command {
 	root.PersistentFlags().StringVar(&g.namespace, "default-namespace", envOr(api.EnvSwarmNamespace, api.SwarmNamespace),
 		"Kubernetes namespace of Swarm objects without a stack (e.g. made with docker service create): import puts them there and reconcile deploys it without a stack prefix (env "+api.EnvSwarmNamespace+")")
 	root.AddCommand(newControllerCmd(modeController), newControllerCmd(modeReconcile), newControllerCmd(modeDiff),
-		newImportCmd(), newMergeCmd(), newGetCmd(), newSuspendCmd(true), newSuspendCmd(false), newVersionCmd())
+		newImportCmd(), newReportCmd(), newMergeCmd(), newGetCmd(), newSuspendCmd(true), newSuspendCmd(false), newVersionCmd())
 	return root
 }
 
@@ -558,7 +558,7 @@ func newImportCmd() *cobra.Command {
 		Short: "Export Swarm services, configs, secrets and volumes as Flux/Kubernetes manifests to a directory or Git",
 		Long: "Export the Swarm once, or with --watch keep exporting it: Swarm stays the\n" +
 			"source of truth and Flux on Kubernetes follows the commits. In watch mode\n" +
-			"the export owns only <path>/apps; files elsewhere (flux-system/, your own\n" +
+			"the export owns only <path>/apps and <path>/MIGRATION.md; files elsewhere (flux-system/, your own\n" +
 			"overlays and patches) are created once when missing and never overwritten.",
 		Args: cobra.NoArgs,
 	}
