@@ -24,6 +24,7 @@ import (
 	"github.com/olljanat-ai/flux4swarm/internal/render"
 	"github.com/olljanat-ai/flux4swarm/internal/secrets"
 	"github.com/olljanat-ai/flux4swarm/internal/swarm"
+	"github.com/olljanat-ai/flux4swarm/internal/translate"
 )
 
 // LocalSourceKind is a source that reads a local directory instead of Git,
@@ -60,6 +61,10 @@ type ksState struct {
 	next     time.Time
 	// appliedRevision of the source at last successful apply.
 	appliedRevision string
+	// workloads maps "Kind/namespace/name" of the workloads of the last
+	// build to their Swarm service names, so health checks in other
+	// Kustomizations can find them.
+	workloads map[string]string
 }
 
 // Controller holds the objects and their status.
@@ -431,24 +436,17 @@ func (c *Controller) reconcileKustomization(ctx context.Context, key string, onc
 		c.mu.Unlock()
 		return
 	}
-	for _, d := range obj.Spec.DependsOn {
-		ns := d.Namespace
-		if ns == "" {
-			ns = obj.Metadata.Namespace
-		}
-		dep := c.kustomization[ksKey(ns, d.Name)]
-		if dep == nil || !dep.status.IsReady() {
-			s.status.LastReconcile = time.Now().UTC()
-			s.status.setReady(ConditionFalse, ReasonDependencyNotReady, fmt.Sprintf("dependency '%s/%s' is not ready", ns, d.Name))
-			s.next = time.Now().Add(retry)
-			if once {
-				s.next = time.Time{}
-			}
-			c.mu.Unlock()
-			return
-		}
-	}
 	src := c.sourceForLocked(obj)
+	if msg := c.dependenciesNotReadyLocked(obj, src); msg != "" {
+		s.status.LastReconcile = time.Now().UTC()
+		s.status.setReady(ConditionFalse, ReasonDependencyNotReady, msg)
+		s.next = time.Now().Add(retry)
+		if once {
+			s.next = time.Time{}
+		}
+		c.mu.Unlock()
+		return
+	}
 	if src == nil || src.artifact == nil {
 		msg := fmt.Sprintf("source %s '%s' not found or has no artifact", obj.Spec.SourceRef.Kind, obj.Spec.SourceRef.Name)
 		fail(ReasonArtifactFailed, errors.New(msg))
@@ -509,6 +507,10 @@ func (c *Controller) reconcileKustomization(ctx context.Context, key string, onc
 	for _, w := range out.Warnings {
 		log.Warn(w)
 	}
+	workloads := map[string]string{}
+	for _, w := range translate.Workloads(set) {
+		workloads[workloadKey(w.Kind, w.Namespace, w.Name)] = w.ServiceName()
+	}
 
 	applier := &swarm.Applier{
 		Client:       c.opts.Docker,
@@ -525,6 +527,9 @@ func (c *Controller) reconcileKustomization(ctx context.Context, key string, onc
 		c.mu.Unlock()
 		return
 	}
+	c.mu.Lock()
+	s.workloads = workloads
+	c.mu.Unlock()
 	changes := res.Changes
 	for _, ch := range changes {
 		if ch.Action != swarm.Unchanged {
@@ -534,6 +539,15 @@ func (c *Controller) reconcileKustomization(ctx context.Context, key string, onc
 
 	if obj.Spec.Wait && len(res.ServiceIDs) > 0 {
 		if err := applier.Wait(rctx, res.ServiceIDs, time.Until(deadline(rctx, timeout))); err != nil {
+			c.mu.Lock()
+			s.status.LastChanges = changes
+			fail(ReasonHealthCheckFailed, err)
+			c.mu.Unlock()
+			return
+		}
+	}
+	if !obj.Spec.Wait && len(obj.Spec.HealthChecks) > 0 && !c.opts.DryRun {
+		if err := c.healthChecks(rctx, key, obj, workloads, time.Until(deadline(rctx, timeout))); err != nil {
 			c.mu.Lock()
 			s.status.LastChanges = changes
 			fail(ReasonHealthCheckFailed, err)

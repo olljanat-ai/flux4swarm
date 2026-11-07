@@ -179,7 +179,20 @@ service-spec annotation).
 * **Wait** (`spec.wait`) uses the convergence checker from
   terraform-provider-docker: all replicas running in their slots on active
   nodes, update completed; rollbacks and paused updates fail the
-  Kustomization.
+  Kustomization. Jobs (replicated jobs) must complete their current
+  iteration, like a Job's `Complete` condition in Flux; a job whose tasks
+  failed with no retry left fails the Kustomization.
+* **Health checks** (`spec.healthChecks`, ignored with `spec.wait` as in
+  Flux) list Deployments, StatefulSets, DaemonSets and Jobs, also ones
+  another Kustomization applied: the Swarm service name comes from the
+  build that applied the workload (so `swarm.flux4swarm.io/name` works),
+  else from the `NS_name` convention, and the service is checked like
+  `spec.wait` does. Kustomization and GitRepository entries must be Ready.
+  Kinds with no Swarm meaning (Service, ConfigMap, ...) count as healthy;
+  other Flux kinds (HelmRelease, ...) are rejected.
+* **dependsOn** waits until each dependency is Ready and, when it uses the
+  same source, has applied the source's current revision, like
+  kustomize-controller.
 * **Prune** (`spec.prune`) removes owned services, then unused configs,
   secrets and networks that left the build.
 

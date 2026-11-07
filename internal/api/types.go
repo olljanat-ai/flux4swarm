@@ -164,7 +164,12 @@ type KustomizationSpec struct {
 	Suspend       bool                          `json:"suspend,omitempty"`
 	Timeout       *Duration                     `json:"timeout,omitempty"`
 	Wait          bool                          `json:"wait,omitempty"`
-	Force         bool                          `json:"force,omitempty"`
+	// HealthChecks lists workloads (Deployment, StatefulSet, DaemonSet,
+	// Job), Kustomizations and GitRepositories that must be healthy for
+	// this Kustomization to become Ready. They may belong to other
+	// Kustomizations. Ignored when Wait is set, like in Flux.
+	HealthChecks []CrossNamespaceObjectReference `json:"healthChecks,omitempty"`
+	Force        bool                            `json:"force,omitempty"`
 
 	TargetNamespace string            `json:"targetNamespace,omitempty"`
 	NamePrefix      string            `json:"namePrefix,omitempty"`
