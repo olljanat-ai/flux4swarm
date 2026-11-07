@@ -71,8 +71,10 @@ Swarm and apply to the Docker Engine API".
    `--default-namespace` (`default` unless set).
    Objects labelled `app.kubernetes.io/part-of: flux` (gotk-components),
    annotated `swarm.flux4swarm.io/ignore: "true"` or
-   `kustomize.toolkit.fluxcd.io/reconcile: disabled`, and kinds with no
-   Swarm meaning are recorded as ignored.
+   `kustomize.toolkit.fluxcd.io/reconcile: disabled`, SOPS encrypted
+   Secrets and kinds with no Swarm meaning are recorded as ignored.
+   HorizontalPodAutoscalers, KEDA ScaledObjects and Flagger Canaries are
+   ignored too, but change how their target is translated.
 
 ## Sources
 
@@ -123,6 +125,9 @@ so in-cluster DNS names keep working.
 | StatefulSet | replicated; `volumeClaimTemplates` become volumes `<ns>_<tpl>-<sts>-{{.Task.Slot}}` |
 | Job `parallelism`/`completions`/`backoffLimit`, `restartPolicy` | `Mode.ReplicatedJob`, `RestartPolicy` |
 | Deployment strategy with surge (default) | `UpdateConfig{Parallelism: 1, Order: start-first}`; `maxSurge: 0` keeps the Swarm default |
+| Argo Rollout (own pod template) | like a Deployment, `UpdateConfig.FailureAction: rollback` |
+| target of a Flagger Canary or of a Rollout `workloadRef` | `UpdateConfig.FailureAction: rollback` (Monitor = `analysis.interval`) |
+| HorizontalPodAutoscaler / KEDA ScaledObject target without `replicas` | `minReplicas` replicas |
 | container `image`, `command`, `args`, `workingDir`, `tty`, `stdin` | `Image`, `Command`, `Args`, `Dir`, `TTY`, `OpenStdin` |
 | `env` (`value`, `configMapKeyRef`, `secretKeyRef`, `fieldRef` name/node/namespace), `envFrom` | `Env` (values inlined) |
 | `securityContext` runAsUser/Group, readOnlyRootFilesystem, capabilities | `User`, `ReadOnly`, `CapabilityAdd/Drop` |
@@ -133,9 +138,13 @@ so in-cluster DNS names keep working.
 | `imagePullSecrets` (dockerconfigjson) | registry auth on create/update |
 | workload `metadata.labels` | service labels |
 
-One container per pod: Swarm services run one container, so pods with
-sidecars are rejected with a clear error. Init containers are ignored with a
-warning.
+One container per pod: Swarm services run one container. In a pod with
+sidecars the container named by `swarm.flux4swarm.io/container` (else the
+first) runs and the others are ignored with a warning. Init containers are
+ignored with a warning. Every other pod or container field without a Swarm
+counterpart (httpGet probes, affinity, tolerations, ...) is listed in one
+warning per workload; see [kubernetes-and-swarm.md](kubernetes-and-swarm.md)
+for the policy and the full list.
 
 ### Volumes
 
@@ -146,6 +155,7 @@ warning.
 | `persistentVolumeClaim` | named volume `<ns>_<claim>` (stack label added); `swarm.flux4swarm.io/volume-driver` and `swarm.flux4swarm.io/volume-options` (JSON) on the PVC set the driver |
 | `emptyDir` / `emptyDir: {medium: Memory}` | anonymous volume / tmpfs (with `sizeLimit`) |
 | `hostPath` | bind mount |
+| anything else (projected, downwardAPI, csi, ...) | mount skipped with a warning |
 
 Volumes are never deleted by prune.
 
@@ -162,7 +172,7 @@ aliases (Swarm VIPs cannot remap ports).
 ExternalSecrets are resolved into the Secret ESO would create
 (`spec.target.name`, one key per `spec.data[].secretKey`; `dataFrom` is not
 supported). Plain Kubernetes Secrets are used as is; SOPS encrypted Secrets
-are rejected. Store credentials (`{name, key}` references) are files in the
+are skipped. Store credentials (`{name, key}` references) are files in the
 credentials directory: `<dir>/<name>/<key>` or `<dir>/<name>_<key>`.
 
 ### Traefik and Gateway API
@@ -317,6 +327,7 @@ the logic is unchanged. The files keep their MPL-2.0 headers (see `NOTICE`).
 * Status lives in memory, so after a restart every Kustomization sends its
   "Reconciliation finished" event again (Git providers skip unchanged
   commit statuses).
-* Kubernetes features without a Swarm counterpart (multi-container pods,
-  ClusterIP port remapping, HPA, RBAC, NetworkPolicy, Ingress) are rejected
-  or ignored as described above.
+* Kubernetes features without a Swarm counterpart (sidecars, ClusterIP port
+  remapping, autoscaling, canary analysis, RBAC, NetworkPolicy, Ingress) are
+  skipped or ignored with a warning, never rejected; `--strict` turns the
+  warnings into failures. See [kubernetes-and-swarm.md](kubernetes-and-swarm.md).

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package translate turns Kubernetes workloads (Deployment, StatefulSet,
-// DaemonSet, Job) and their Services, ConfigMaps, Secrets and
+// DaemonSet, Job, Argo Rollout) and their Services, ConfigMaps, Secrets and
 // PersistentVolumeClaims into Docker Swarm services, configs, secrets and
 // networks. A Kubernetes namespace becomes a Docker stack.
 package translate
@@ -21,6 +21,8 @@ import (
 	"github.com/docker/docker/api/types/swarm"
 	jsonpatch "github.com/evanphx/json-patch/v5"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -66,6 +68,54 @@ type Workload struct {
 	Completions  *int32
 	Parallelism  *int32
 	BackoffLimit *int32
+
+	// Unsupported lists workload fields that have no Swarm equivalent.
+	Unsupported []string
+	// Rollout is the Argo Rollouts strategy ("canary", "blueGreen") of a
+	// Rollout, or of the Rollout that references this Deployment.
+	Rollout string
+	// RolloutRef names the Rollout that manages this Deployment through
+	// spec.workloadRef.
+	RolloutRef string
+	// Canary is the Flagger Canary that targets this workload.
+	Canary string
+	// Rollback makes a failed Swarm update roll back automatically, which
+	// is what Argo Rollouts and Flagger do on Kubernetes.
+	Rollback bool
+	// Monitor is how long Swarm watches each updated task for failure.
+	Monitor time.Duration
+	// Scaler is the autoscaler that targets this workload; ScaledReplicas
+	// is true when Replicas comes from its minReplicas.
+	Scaler         *api.Scaler
+	ScaledReplicas bool
+}
+
+// MainContainer returns the container of the pod that runs on Swarm: the
+// one named by the swarm.flux4swarm.io/container annotation, else the first.
+// ignored lists the names of the other containers.
+func (w *Workload) MainContainer() (main corev1.Container, ignored []string, err error) {
+	cs := w.Template.Spec.Containers
+	if len(cs) == 0 {
+		return main, nil, fmt.Errorf("pod has no containers")
+	}
+	idx := 0
+	if n := w.Annotations[api.AnnotationContainer]; n != "" {
+		idx = -1
+		for i := range cs {
+			if cs[i].Name == n {
+				idx = i
+			}
+		}
+		if idx < 0 {
+			return main, nil, fmt.Errorf("annotation %s: container %q not found", api.AnnotationContainer, n)
+		}
+	}
+	for i := range cs {
+		if i != idx {
+			ignored = append(ignored, cs[i].Name)
+		}
+	}
+	return cs[idx], ignored, nil
 }
 
 // Key is "namespace/name" of the workload's Swarm service.
@@ -80,21 +130,107 @@ func (w *Workload) ServiceName() string {
 func Workloads(set *api.Set) []*Workload {
 	var out []*Workload
 	for _, d := range set.Deployments {
+		var un []string
+		if d.Spec.MinReadySeconds > 0 {
+			un = append(un, "minReadySeconds")
+		}
+		if d.Spec.ProgressDeadlineSeconds != nil {
+			un = append(un, "progressDeadlineSeconds")
+		}
+		if d.Spec.Paused {
+			un = append(un, "paused")
+		}
 		out = append(out, &Workload{Kind: "Deployment", Namespace: d.Namespace, Name: d.Name, Labels: d.Labels,
-			Annotations: d.Annotations, Template: d.Spec.Template, Replicas: d.Spec.Replicas, Strategy: &d.Spec.Strategy})
+			Annotations: d.Annotations, Template: d.Spec.Template, Replicas: d.Spec.Replicas, Strategy: &d.Spec.Strategy,
+			Unsupported: un})
 	}
 	for _, s := range set.StatefulSets {
+		var un []string
+		if s.Spec.PodManagementPolicy == appsv1.ParallelPodManagement {
+			un = append(un, "podManagementPolicy: Parallel")
+		}
+		if s.Spec.UpdateStrategy.Type == appsv1.OnDeleteStatefulSetStrategyType {
+			un = append(un, "updateStrategy: OnDelete")
+		}
+		if s.Spec.PersistentVolumeClaimRetentionPolicy != nil {
+			un = append(un, "persistentVolumeClaimRetentionPolicy")
+		}
 		out = append(out, &Workload{Kind: "StatefulSet", Namespace: s.Namespace, Name: s.Name, Labels: s.Labels,
-			Annotations: s.Annotations, Template: s.Spec.Template, Replicas: s.Spec.Replicas, ClaimTemplates: s.Spec.VolumeClaimTemplates})
+			Annotations: s.Annotations, Template: s.Spec.Template, Replicas: s.Spec.Replicas, ClaimTemplates: s.Spec.VolumeClaimTemplates,
+			Unsupported: un})
 	}
 	for _, d := range set.DaemonSets {
+		var un []string
+		if d.Spec.UpdateStrategy.Type == appsv1.OnDeleteDaemonSetStrategyType {
+			un = append(un, "updateStrategy: OnDelete")
+		}
 		out = append(out, &Workload{Kind: "DaemonSet", Namespace: d.Namespace, Name: d.Name, Labels: d.Labels,
-			Annotations: d.Annotations, Template: d.Spec.Template})
+			Annotations: d.Annotations, Template: d.Spec.Template, Unsupported: un})
 	}
 	for _, j := range set.Jobs {
+		var un []string
+		if j.Spec.ActiveDeadlineSeconds != nil {
+			un = append(un, "activeDeadlineSeconds")
+		}
+		if j.Spec.TTLSecondsAfterFinished != nil {
+			un = append(un, "ttlSecondsAfterFinished")
+		}
+		if j.Spec.CompletionMode != nil && *j.Spec.CompletionMode == batchv1.IndexedCompletion {
+			un = append(un, "completionMode: Indexed")
+		}
+		if j.Spec.BackoffLimitPerIndex != nil {
+			un = append(un, "backoffLimitPerIndex")
+		}
+		if j.Spec.PodFailurePolicy != nil {
+			un = append(un, "podFailurePolicy")
+		}
 		out = append(out, &Workload{Kind: "Job", Namespace: j.Namespace, Name: j.Name, Labels: j.Labels,
 			Annotations: j.Annotations, Template: j.Spec.Template, Completions: j.Spec.Completions,
-			Parallelism: j.Spec.Parallelism, BackoffLimit: j.Spec.BackoffLimit})
+			Parallelism: j.Spec.Parallelism, BackoffLimit: j.Spec.BackoffLimit, Unsupported: un})
+	}
+	// A Rollout with its own pod template runs like a Deployment with a
+	// rolling update; one with workloadRef reuses the referenced Deployment.
+	refs := map[string]*api.Rollout{}
+	for _, r := range set.Rollouts {
+		if wr := r.Spec.WorkloadRef; wr != nil {
+			refs[api.TargetKey(wr.Kind, r.Metadata.Namespace, wr.Name)] = r
+			continue
+		}
+		out = append(out, &Workload{Kind: api.KindRollout, Namespace: r.Metadata.Namespace, Name: r.Metadata.Name,
+			Labels: r.Metadata.Labels, Annotations: r.Metadata.Annotations, Template: r.Spec.Template,
+			Replicas: r.Spec.Replicas, Strategy: &appsv1.DeploymentStrategy{}, Rollout: r.Strategy(), Rollback: true})
+	}
+	canaries := map[string]api.Canary{}
+	for _, c := range set.Canaries {
+		canaries[api.TargetKey(c.Target.Kind, c.Namespace, c.Target.Name)] = c
+	}
+	scalers := map[string]api.Scaler{}
+	for _, s := range set.Scalers {
+		scalers[api.TargetKey(s.Target.Kind, s.Namespace, s.Target.Name)] = s
+	}
+	for _, w := range out {
+		k := api.TargetKey(w.Kind, w.Namespace, w.Name)
+		if r := refs[k]; r != nil {
+			w.RolloutRef, w.Rollout, w.Rollback = r.Metadata.Name, r.Strategy(), true
+			// Argo scales the referenced Deployment down; the Rollout's
+			// replicas are what should run.
+			if r.Spec.Replicas != nil {
+				w.Replicas = r.Spec.Replicas
+			} else {
+				one := int32(1)
+				w.Replicas = &one
+			}
+		}
+		if c, ok := canaries[k]; ok {
+			w.Canary, w.Rollback, w.Monitor = c.Object, true, c.Interval
+		}
+		if s, ok := scalers[k]; ok {
+			w.Scaler = &s
+			if w.Replicas == nil && w.Kind != "DaemonSet" && w.Kind != "Job" {
+				m := s.MinReplicas
+				w.Replicas, w.ScaledReplicas = &m, true
+			}
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ServiceName() < out[j].ServiceName() })
 	return out
@@ -149,6 +285,14 @@ func Translate(in Input) (*Output, error) {
 		t.pvcs[p.Namespace+"/"+p.Name] = p
 	}
 	seen := map[string]string{}
+	for _, r := range in.Set.Rollouts {
+		if wr := r.Spec.WorkloadRef; wr != nil && wr.Kind != "Deployment" {
+			t.warn("Rollout %s/%s: workloadRef kind %s is not supported on Swarm; the Rollout was ignored", r.Metadata.Namespace, r.Metadata.Name, wr.Kind)
+		}
+	}
+	for _, p := range in.Set.PVCs {
+		t.pvcWarnings("PersistentVolumeClaim "+p.Namespace+"/"+p.Name, p)
+	}
 	for _, w := range Workloads(in.Set) {
 		svc, err := t.workload(w)
 		if err != nil {
@@ -197,13 +341,18 @@ func (t *translator) matchingServices(ns string, podLabels map[string]string) []
 
 func (t *translator) workload(w *Workload) (*swarmapply.Service, error) {
 	pod := w.Template.Spec
-	if len(pod.Containers) != 1 {
-		return nil, fmt.Errorf("pods with %d containers cannot run as one Swarm service; split them or annotate %s: \"true\"", len(pod.Containers), api.AnnotationIgnore)
+	c, sidecars, err := w.MainContainer()
+	if err != nil {
+		return nil, err
+	}
+	if len(sidecars) > 0 {
+		t.warn("%s %s/%s: a Swarm service runs one container; %q runs and %s %s ignored (choose with %s)",
+			w.Kind, w.Namespace, w.Name, c.Name, quoteList(sidecars), plural(len(sidecars), "was", "were"), api.AnnotationContainer)
 	}
 	if len(pod.InitContainers) > 0 {
 		t.warn("%s %s/%s: init containers are not supported on Swarm and were ignored", w.Kind, w.Namespace, w.Name)
 	}
-	c := pod.Containers[0]
+	t.audit(w, c)
 	name := w.ServiceName()
 
 	spec := swarm.ServiceSpec{Annotations: swarm.Annotations{Name: name, Labels: copyMap(w.Labels)}}
@@ -337,6 +486,19 @@ func (t *translator) workload(w *Workload) (*swarmapply.Service, error) {
 			}
 		}
 	}
+	// Argo Rollouts and Flagger roll back a failed release; Swarm can do
+	// the same for a failed update.
+	if w.Rollback && w.Kind != "Job" {
+		if spec.UpdateConfig == nil {
+			// The Swarm defaults, made explicit.
+			spec.UpdateConfig = &swarm.UpdateConfig{Parallelism: 1, Order: swarm.UpdateOrderStopFirst}
+		}
+		spec.UpdateConfig.FailureAction = swarm.UpdateFailureActionRollback
+		if w.Monitor > 0 {
+			spec.UpdateConfig.Monitor = w.Monitor
+		}
+	}
+	t.deliveryWarnings(w)
 
 	// Networks, aliases and published ports from Kubernetes Services.
 	svcs := t.matchingServices(w.Namespace, w.Template.Labels)
@@ -549,6 +711,7 @@ func (t *translator) volumes(w *Workload, c corev1.Container, cs *swarm.Containe
 		v, ok := vols[vm.Name]
 		if !ok {
 			if p, ok := claimTpl[vm.Name]; ok {
+				t.pvcWarnings(fmt.Sprintf("%s %s/%s volumeClaimTemplate %s", w.Kind, w.Namespace, w.Name, p.Name), &p)
 				src := SwarmName(w.Namespace, p.Name+"-"+w.Name) + "-{{.Task.Slot}}"
 				cs.Mounts = append(cs.Mounts, volumeMount(src, vm, &p, w.Namespace))
 				continue
@@ -627,7 +790,8 @@ func (t *translator) volumes(w *Workload, c corev1.Container, cs *swarm.Containe
 			}
 			cs.Mounts = append(cs.Mounts, m)
 		default:
-			return fmt.Errorf("volume %q: only configMap, secret, emptyDir, hostPath and persistentVolumeClaim volumes are supported", v.Name)
+			t.warn("%s %s/%s: %s volume %q is not supported on Swarm; its mount at %s was skipped (supported: configMap, secret, emptyDir, hostPath, persistentVolumeClaim)",
+				w.Kind, w.Namespace, w.Name, volumeType(v), v.Name, vm.MountPath)
 		}
 	}
 	return nil
@@ -999,10 +1163,11 @@ func Backend(set *api.Set) func(ns, name string, port int32) (string, uint32, er
 			return "", 0, fmt.Errorf("Service %s/%s selects %d workloads; exactly one is needed on Swarm", ns, name, len(found))
 		}
 		w := found[0]
-		if len(w.Template.Spec.Containers) == 0 {
-			return "", 0, fmt.Errorf("workload %s has no containers", w.Name)
+		c, _, err := w.MainContainer()
+		if err != nil {
+			return "", 0, fmt.Errorf("workload %s: %w", w.Name, err)
 		}
-		tp, err := targetPort(sp.TargetPort, sp.Port, w.Template.Spec.Containers[0])
+		tp, err := targetPort(sp.TargetPort, sp.Port, c)
 		if err != nil {
 			return "", 0, err
 		}

@@ -237,6 +237,7 @@ func newControllerCmd(mode string) *cobra.Command {
 		timeout     time.Duration
 		prune, wait bool
 		dryRun      bool
+		strict      bool
 		credsDir    string
 		cacheDir    string
 		listen      string
@@ -276,6 +277,7 @@ func newControllerCmd(mode string) *cobra.Command {
 	if mode != modeDiff {
 		cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would change without changing Swarm")
 	}
+	cmd.Flags().BoolVar(&strict, "strict", false, "fail a Kustomization that uses Kubernetes features Swarm does not support, instead of skipping them with a warning")
 	cmd.Flags().StringVar(&credsDir, "credentials-dir", creds.DefaultDir, "directory with credential secrets (<dir>/<name>/<key> or <dir>/<name>_<key>)")
 	cmd.Flags().StringVar(&cacheDir, "cache-dir", filepath.Join(os.TempDir(), "flux4swarm"), "directory for Git checkouts")
 	if !once {
@@ -304,7 +306,7 @@ func newControllerCmd(mode string) *cobra.Command {
 		host, _ := os.Hostname()
 		c := controller.New(controller.Options{
 			Docker: dc, Creds: store, CacheDir: cacheDir, RegistryAuth: auths, DryRun: dryRun,
-			Diff: mode == modeDiff, APIToken: apiToken, Log: slog.Default(),
+			Diff: mode == modeDiff, Strict: strict, APIToken: apiToken, Log: slog.Default(),
 			Instance: host,
 		})
 		if err := addObjects(c, store, &gf, configs, path, interval, ksInterval, timeout, prune, wait); err != nil {

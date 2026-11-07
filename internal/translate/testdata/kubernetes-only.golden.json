@@ -1,0 +1,184 @@
+{
+  "warnings": [
+    "PersistentVolumeClaim shop/data: storageClassName \"fast-ssd\" is not supported on Swarm, a local volume is used (set swarm.flux4swarm.io/volume-driver)",
+    "Deployment shop/api: a Swarm service runs one container; \"api\" runs and \"log-shipper\" was ignored (choose with swarm.flux4swarm.io/container)",
+    "Rollout shop/cart: canary steps are not supported on Swarm; it is updated as a rolling update that rolls back on failure",
+    "Rollout shop/cart: autoscaled by keda.sh/v1alpha1 ScaledObject shop/cart; autoscaling is not supported on Swarm, it runs spec.replicas (4)",
+    "Deployment shop/checkout: managed by Rollout checkout (workloadRef); blueGreen steps are not supported on Swarm, it is updated as a rolling update that rolls back on failure",
+    "Deployment shop/web: a Swarm service runs one container; \"web\" runs and \"proxy\" was ignored (choose with swarm.flux4swarm.io/container)",
+    "Deployment shop/web: not supported on Swarm and ignored: affinity, tolerations, serviceAccountName, readinessProbe (httpGet), resources nvidia.com/gpu",
+    "Deployment shop/web: projected volume \"token\" is not supported on Swarm; its mount at /var/run/token was skipped (supported: configMap, secret, emptyDir, hostPath, persistentVolumeClaim)",
+    "Deployment shop/web: target of Flagger flagger.app/v1beta1 Canary shop/web; canary analysis is not supported on Swarm, a failed update rolls back",
+    "Deployment shop/web: autoscaled by autoscaling/v2 HorizontalPodAutoscaler shop/web; autoscaling is not supported on Swarm, it runs minReplicas (3)"
+  ],
+  "networks": [
+    {
+      "name": "shop_default",
+      "labels": {
+        "com.docker.stack.namespace": "shop"
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "shop_api",
+      "spec": {
+        "Name": "shop_api",
+        "Labels": {
+          "com.docker.stack.namespace": "shop"
+        },
+        "TaskTemplate": {
+          "ContainerSpec": {
+            "Image": "example/api:1",
+            "Labels": {
+              "com.docker.stack.namespace": "shop"
+            }
+          },
+          "Networks": [
+            {
+              "Target": "shop_default"
+            }
+          ],
+          "ForceUpdate": 0
+        },
+        "Mode": {
+          "Replicated": {
+            "Replicas": 2
+          }
+        },
+        "UpdateConfig": {
+          "Parallelism": 1,
+          "MaxFailureRatio": 0,
+          "Order": "start-first"
+        }
+      }
+    },
+    {
+      "name": "shop_cart",
+      "spec": {
+        "Name": "shop_cart",
+        "Labels": {
+          "com.docker.stack.namespace": "shop"
+        },
+        "TaskTemplate": {
+          "ContainerSpec": {
+            "Image": "example/cart:1",
+            "Labels": {
+              "com.docker.stack.namespace": "shop"
+            }
+          },
+          "Networks": [
+            {
+              "Target": "shop_default"
+            }
+          ],
+          "ForceUpdate": 0
+        },
+        "Mode": {
+          "Replicated": {
+            "Replicas": 4
+          }
+        },
+        "UpdateConfig": {
+          "Parallelism": 1,
+          "FailureAction": "rollback",
+          "MaxFailureRatio": 0,
+          "Order": "start-first"
+        }
+      }
+    },
+    {
+      "name": "shop_checkout",
+      "spec": {
+        "Name": "shop_checkout",
+        "Labels": {
+          "com.docker.stack.namespace": "shop"
+        },
+        "TaskTemplate": {
+          "ContainerSpec": {
+            "Image": "example/checkout:1",
+            "Labels": {
+              "com.docker.stack.namespace": "shop"
+            }
+          },
+          "Networks": [
+            {
+              "Target": "shop_default"
+            }
+          ],
+          "ForceUpdate": 0
+        },
+        "Mode": {
+          "Replicated": {
+            "Replicas": 3
+          }
+        },
+        "UpdateConfig": {
+          "Parallelism": 1,
+          "FailureAction": "rollback",
+          "MaxFailureRatio": 0,
+          "Order": "start-first"
+        }
+      }
+    },
+    {
+      "name": "shop_web",
+      "spec": {
+        "Name": "shop_web",
+        "Labels": {
+          "com.docker.stack.namespace": "shop"
+        },
+        "TaskTemplate": {
+          "ContainerSpec": {
+            "Image": "example/web:1",
+            "Labels": {
+              "com.docker.stack.namespace": "shop"
+            },
+            "Mounts": [
+              {
+                "Type": "volume",
+                "Source": "shop_data",
+                "Target": "/data",
+                "VolumeOptions": {
+                  "Labels": {
+                    "com.docker.stack.namespace": "shop"
+                  }
+                }
+              }
+            ],
+            "Healthcheck": {
+              "Test": [
+                "CMD",
+                "/bin/healthy"
+              ]
+            }
+          },
+          "Resources": {
+            "Limits": {
+              "NanoCPUs": 500000000,
+              "MemoryBytes": 268435456
+            }
+          },
+          "Networks": [
+            {
+              "Target": "shop_default"
+            }
+          ],
+          "ForceUpdate": 0
+        },
+        "Mode": {
+          "Replicated": {
+            "Replicas": 3
+          }
+        },
+        "UpdateConfig": {
+          "Parallelism": 1,
+          "FailureAction": "rollback",
+          "Monitor": 30000000000,
+          "MaxFailureRatio": 0,
+          "Order": "start-first"
+        }
+      }
+    }
+  ]
+}

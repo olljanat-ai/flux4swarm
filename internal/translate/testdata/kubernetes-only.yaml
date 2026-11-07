@@ -1,0 +1,132 @@
+# Kubernetes-only features: none of them fail the build. They are dropped
+# with a warning, or mapped to the closest Swarm behaviour.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: web, namespace: shop}
+spec:
+  # No replicas: the HorizontalPodAutoscaler owns them on Kubernetes.
+  selector: {matchLabels: {app: web}}
+  template:
+    metadata: {labels: {app: web}}
+    spec:
+      serviceAccountName: web
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm: {topologyKey: kubernetes.io/hostname, labelSelector: {matchLabels: {app: web}}}
+      tolerations: [{key: dedicated, operator: Exists}]
+      containers:
+        - name: web
+          image: example/web:1
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /ready, port: http}}
+          livenessProbe: {exec: {command: [/bin/healthy]}}
+          resources:
+            limits: {cpu: 500m, memory: 256Mi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: token, mountPath: /var/run/token}
+            - {name: data, mountPath: /data}
+        - name: proxy
+          image: example/proxy:1
+      volumes:
+        - name: token
+          projected: {sources: [{serviceAccountToken: {path: token}}]}
+        - name: data
+          persistentVolumeClaim: {claimName: data}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: data, namespace: shop}
+spec:
+  storageClassName: fast-ssd
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: web, namespace: shop}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: web}
+  minReplicas: 3
+  maxReplicas: 10
+---
+apiVersion: flagger.app/v1beta1
+kind: Canary
+metadata: {name: web, namespace: shop}
+spec:
+  targetRef: {apiVersion: apps/v1, kind: Deployment, name: web}
+  analysis: {interval: 30s, threshold: 5, maxWeight: 50, stepWeight: 10}
+---
+# Sidecar: the annotation picks the container that runs on Swarm.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: shop
+  annotations: {swarm.flux4swarm.io/container: api}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: api}}
+  template:
+    metadata: {labels: {app: api}}
+    spec:
+      containers:
+        - {name: log-shipper, image: example/shipper:1}
+        - {name: api, image: example/api:1}
+---
+# Argo Rollout with its own pod template runs like a Deployment.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata: {name: cart, namespace: shop}
+spec:
+  replicas: 4
+  selector: {matchLabels: {app: cart}}
+  template:
+    metadata: {labels: {app: cart}}
+    spec:
+      containers: [{name: cart, image: example/cart:1}]
+  strategy:
+    canary:
+      steps: [{setWeight: 20}, {pause: {}}]
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: {name: cart, namespace: shop}
+spec:
+  scaleTargetRef: {apiVersion: argoproj.io/v1alpha1, kind: Rollout, name: cart}
+  minReplicaCount: 0
+---
+# Argo Rollout that references a Deployment: the Deployment runs with the
+# Rollout's replicas (Argo scales the Deployment itself to zero).
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: checkout, namespace: shop}
+spec:
+  replicas: 0
+  selector: {matchLabels: {app: checkout}}
+  template:
+    metadata: {labels: {app: checkout}}
+    spec:
+      containers: [{name: checkout, image: example/checkout:1}]
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata: {name: checkout, namespace: shop}
+spec:
+  replicas: 3
+  workloadRef: {apiVersion: apps/v1, kind: Deployment, name: checkout}
+  strategy:
+    blueGreen: {activeService: checkout, previewService: checkout-preview}
+---
+apiVersion: v1
+kind: Secret
+metadata: {name: k8s-only, namespace: shop}
+stringData: {password: "ENC[AES256_GCM,data:abc]"}
+sops:
+  version: 3.9.0
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: deny-all, namespace: shop}
+spec: {podSelector: {}}

@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -195,11 +196,11 @@ kind: Deployment
 metadata: {name: a, namespace: shop}
 spec:
   selector: {matchLabels: {app: a}}
-  template: {metadata: {labels: {app: a}}, spec: {containers: [{name: a, image: a}, {name: b, image: b}]}}
+  template: {metadata: {labels: {app: a}}, spec: {containers: [{name: a, image: a, envFrom: [{configMapRef: {name: nope}}]}]}}
 `},
 			ks:     kustomization("apps", "./apps"),
 			reason: ReasonBuildFailed,
-			msg:    "pods with 2 containers",
+			msg:    `envFrom configMap "nope" not found`,
 		},
 		"missing source": {
 			ks: kustomization("apps", "./apps", func(s *api.KustomizationSpec) {
@@ -379,5 +380,43 @@ spec:
 	}
 	if _, ok := e.docker.Service("shop_db"); !ok {
 		t.Errorf("sibling's service removed: %v", e.docker.Names())
+	}
+}
+
+// Kubernetes-only features are skipped with a warning; --strict turns the
+// warnings into a failed build.
+func TestKubernetesOnlyFeatures(t *testing.T) {
+	files := map[string]string{"apps/a.yaml": `apiVersion: apps/v1
+kind: Deployment
+metadata: {name: a, namespace: shop}
+spec:
+  selector: {matchLabels: {app: a}}
+  template: {metadata: {labels: {app: a}}, spec: {containers: [{name: a, image: a}, {name: b, image: b}]}}
+`}
+	for _, strict := range []bool{false, true} {
+		t.Run(fmt.Sprintf("strict=%v", strict), func(t *testing.T) {
+			e := newEnv(t, func(o *Options) { o.Strict = strict })
+			for p, c := range files {
+				write(t, e.root, p, c)
+			}
+			e.c.AddKustomization(kustomization("apps", "./apps"))
+			err := e.reconcile()
+			st := e.status(api.KindKustomization, "apps")
+			if len(st.Warnings) != 1 || !strings.Contains(st.Warnings[0], `"b" was ignored`) {
+				t.Errorf("warnings %v", st.Warnings)
+			}
+			if !strict {
+				if err != nil || st.Ready.Status != ConditionTrue {
+					t.Fatalf("err %v, ready %+v", err, st.Ready)
+				}
+				return
+			}
+			if err == nil || st.Ready.Reason != ReasonBuildFailed || !strings.Contains(st.Ready.Message, "strict mode: 1 warning(s)") {
+				t.Errorf("err %v, ready %+v", err, st.Ready)
+			}
+			if n := e.docker.Names(); len(n) != 0 {
+				t.Errorf("objects created: %v", n)
+			}
+		})
 	}
 }
