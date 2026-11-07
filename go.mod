@@ -3,6 +3,7 @@ module github.com/olljanat-ai/flux4swarm
 go 1.27.0
 
 require (
+	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/drone/envsubst v1.0.3
 	github.com/evanphx/json-patch/v5 v5.9.11
@@ -19,7 +20,6 @@ require (
 
 require (
 	dario.cat/mergo v1.0.0 // indirect
-	github.com/Masterminds/semver/v3 v3.5.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProtonMail/go-crypto v1.1.6 // indirect
 	github.com/blang/semver/v4 v4.0.0 // indirect
