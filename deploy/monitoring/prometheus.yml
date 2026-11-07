@@ -1,0 +1,11 @@
+# Scrapes the flux4swarm controller of deploy/flux4swarm-stack.yaml. The
+# monitoring stack joins the flux-system_default network, where the
+# controller's tasks resolve as tasks.controller.
+global:
+  scrape_interval: 30s
+scrape_configs:
+  - job_name: flux4swarm
+    dns_sd_configs:
+      - names: [tasks.controller]
+        type: A
+        port: 9797

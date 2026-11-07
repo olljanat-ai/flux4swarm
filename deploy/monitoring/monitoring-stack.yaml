@@ -1,0 +1,47 @@
+# Prometheus and Grafana with the Flux GitOps dashboard, for a Swarm where
+# deploy/flux4swarm-stack.yaml runs as stack flux-system:
+#   docker config create prometheus.yml deploy/monitoring/prometheus.yml
+#   docker config create grafana-datasource deploy/monitoring/grafana/provisioning/datasources/prometheus.yaml
+#   docker config create grafana-dashboards deploy/monitoring/grafana/provisioning/dashboards/flux.yaml
+#   docker config create grafana-flux-gitops deploy/monitoring/grafana/flux-gitops.json
+#   docker stack deploy -c deploy/monitoring/monitoring-stack.yaml monitoring
+# Grafana listens on :3000 (admin/admin on first login).
+version: "3.8"
+services:
+  prometheus:
+    image: prom/prometheus:v3.7.0
+    configs:
+      - source: prometheus.yml
+        target: /etc/prometheus/prometheus.yml
+    volumes:
+      - prometheus:/prometheus
+    networks: [default, flux-system]
+  grafana:
+    image: grafana/grafana:12.2.0
+    ports:
+      - "3000:3000"
+    configs:
+      - source: grafana-datasource
+        target: /etc/grafana/provisioning/datasources/prometheus.yaml
+      - source: grafana-dashboards
+        target: /etc/grafana/provisioning/dashboards/flux.yaml
+      - source: grafana-flux-gitops
+        target: /etc/grafana/dashboards/flux-gitops.json
+    volumes:
+      - grafana:/var/lib/grafana
+configs:
+  prometheus.yml:
+    external: true
+  grafana-datasource:
+    external: true
+  grafana-dashboards:
+    external: true
+  grafana-flux-gitops:
+    external: true
+networks:
+  flux-system:
+    external: true
+    name: flux-system_default
+volumes:
+  prometheus: {}
+  grafana: {}
