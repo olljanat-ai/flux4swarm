@@ -75,49 +75,30 @@ spec:
         - {name: log-shipper, image: example/shipper:1}
         - {name: api, image: example/api:1}
 ---
-# Argo Rollout with its own pod template runs like a Deployment.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: worker, namespace: shop}
+spec:
+  selector: {matchLabels: {app: worker}}
+  template:
+    metadata: {labels: {app: worker}}
+    spec:
+      containers: [{name: worker, image: example/worker:1}]
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: {name: worker, namespace: shop}
+spec:
+  scaleTargetRef: {name: worker}
+  minReplicaCount: 0
+---
+# Argo Rollouts is not translated: the Rollout is skipped.
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 metadata: {name: cart, namespace: shop}
 spec:
   replicas: 4
-  selector: {matchLabels: {app: cart}}
-  template:
-    metadata: {labels: {app: cart}}
-    spec:
-      containers: [{name: cart, image: example/cart:1}]
-  strategy:
-    canary:
-      steps: [{setWeight: 20}, {pause: {}}]
----
-apiVersion: keda.sh/v1alpha1
-kind: ScaledObject
-metadata: {name: cart, namespace: shop}
-spec:
-  scaleTargetRef: {apiVersion: argoproj.io/v1alpha1, kind: Rollout, name: cart}
-  minReplicaCount: 0
----
-# Argo Rollout that references a Deployment: the Deployment runs with the
-# Rollout's replicas (Argo scales the Deployment itself to zero).
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name: checkout, namespace: shop}
-spec:
-  replicas: 0
-  selector: {matchLabels: {app: checkout}}
-  template:
-    metadata: {labels: {app: checkout}}
-    spec:
-      containers: [{name: checkout, image: example/checkout:1}]
----
-apiVersion: argoproj.io/v1alpha1
-kind: Rollout
-metadata: {name: checkout, namespace: shop}
-spec:
-  replicas: 3
-  workloadRef: {apiVersion: apps/v1, kind: Deployment, name: checkout}
-  strategy:
-    blueGreen: {activeService: checkout, previewService: checkout-preview}
+  strategy: {canary: {steps: [{setWeight: 20}]}}
 ---
 apiVersion: v1
 kind: Secret

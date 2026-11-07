@@ -55,9 +55,8 @@ type Set struct {
 	HTTPRoutes  []*gatewayv1.HTTPRoute
 	Middlewares []*TraefikMiddleware
 
-	// Argo Rollouts run as Deployments. Autoscalers and Flagger Canaries
-	// are skipped but change how their target is translated.
-	Rollouts []*Rollout
+	// Autoscalers and Flagger Canaries are skipped but change how their
+	// target is translated.
 	Scalers  []Scaler
 	Canaries []Canary
 
@@ -311,13 +310,6 @@ func (s *Set) decodeOne(doc []byte, defNS string) error {
 		}
 		o.Metadata.Namespace = ns
 		s.Middlewares = append(s.Middlewares, o)
-	case group == "argoproj.io" && h.Kind == KindRollout:
-		o := &Rollout{}
-		if err := dec(o); err != nil {
-			return err
-		}
-		o.Metadata.Namespace = ns
-		s.Rollouts = append(s.Rollouts, o)
 	case (group == "autoscaling" && h.Kind == KindHPA) || (group == "keda.sh" && h.Kind == KindScaledObject):
 		sc, err := decodeScaler(id, ns, h.Kind, dec)
 		if err != nil {

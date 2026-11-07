@@ -4,19 +4,15 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
-
-	corev1 "k8s.io/api/core/v1"
 )
 
-// Progressive delivery and autoscaling kinds. They have no Swarm
+// Flagger and autoscaling kinds. They have no Swarm
 // equivalent, so they are listed as skipped, but they change how their
 // target workload is translated.
 const (
-	KindRollout       = "Rollout"
 	KindCanary        = "Canary"
 	KindHPA           = "HorizontalPodAutoscaler"
 	KindScaledObject  = "ScaledObject"
@@ -25,41 +21,11 @@ const (
 	IgnoredSOPS       = "SOPS encrypted; SOPS is not supported on Swarm, use an ExternalSecret"
 )
 
-// Rollout is an Argo Rollouts argoproj.io/v1alpha1 Rollout. On Swarm it
-// runs like a Deployment with its pod template.
-type Rollout struct {
-	TypeMeta `json:",inline"`
-	Metadata ObjectMeta  `json:"metadata"`
-	Spec     RolloutSpec `json:"spec"`
-}
-
-// RolloutSpec is the subset of a Rollout spec flux4swarm uses.
-type RolloutSpec struct {
-	Replicas    *int32                 `json:"replicas,omitempty"`
-	Template    corev1.PodTemplateSpec `json:"template"`
-	WorkloadRef *WorkloadRef           `json:"workloadRef,omitempty"`
-	Strategy    struct {
-		Canary    *json.RawMessage `json:"canary,omitempty"`
-		BlueGreen *json.RawMessage `json:"blueGreen,omitempty"`
-	} `json:"strategy"`
-}
-
-// WorkloadRef points a Rollout or an autoscaler at a workload.
+// WorkloadRef points an autoscaler or a Canary at a workload.
 type WorkloadRef struct {
 	APIVersion string `json:"apiVersion,omitempty"`
 	Kind       string `json:"kind"`
 	Name       string `json:"name"`
-}
-
-// Strategy is "canary", "blueGreen" or "".
-func (r *Rollout) Strategy() string {
-	switch {
-	case r.Spec.Strategy.BlueGreen != nil:
-		return "blueGreen"
-	case r.Spec.Strategy.Canary != nil:
-		return "canary"
-	}
-	return ""
 }
 
 // Scaler is an object that changes the replicas of a workload on

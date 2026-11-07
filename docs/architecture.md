@@ -125,8 +125,7 @@ so in-cluster DNS names keep working.
 | StatefulSet | replicated; `volumeClaimTemplates` become volumes `<ns>_<tpl>-<sts>-{{.Task.Slot}}` |
 | Job `parallelism`/`completions`/`backoffLimit`, `restartPolicy` | `Mode.ReplicatedJob`, `RestartPolicy` |
 | Deployment strategy with surge (default) | `UpdateConfig{Parallelism: 1, Order: start-first}`; `maxSurge: 0` keeps the Swarm default |
-| Argo Rollout (own pod template) | like a Deployment, `UpdateConfig.FailureAction: rollback` |
-| target of a Flagger Canary or of a Rollout `workloadRef` | `UpdateConfig.FailureAction: rollback` (Monitor = `analysis.interval`) |
+| target of a Flagger Canary | `UpdateConfig.FailureAction: rollback` (Monitor = `analysis.interval`) |
 | HorizontalPodAutoscaler / KEDA ScaledObject target without `replicas` | `minReplicas` replicas |
 | container `image`, `command`, `args`, `workingDir`, `tty`, `stdin` | `Image`, `Command`, `Args`, `Dir`, `TTY`, `OpenStdin` |
 | `env` (`value`, `configMapKeyRef`, `secretKeyRef`, `fieldRef` name/node/namespace), `envFrom` | `Env` (values inlined) |

@@ -77,8 +77,7 @@ func (c *Controller) healthChecks(ctx context.Context, key string, ks *api.Kusto
 		id := fmt.Sprintf("%s/%s/%s", ref.Kind, ns, ref.Name)
 		group, _, _ := strings.Cut(ref.APIVersion, "/")
 		switch {
-		case (workloadKinds[ref.Kind] && (group == "" || group == "apps" || group == "batch" || group == "v1")) ||
-			(ref.Kind == api.KindRollout && group == "argoproj.io"):
+		case workloadKinds[ref.Kind] && (group == "" || group == "apps" || group == "batch" || group == "v1"):
 			svc := c.serviceFor(key, own, ref.Kind, ns, ref.Name)
 			checks = append(checks, healthCheck{name: id + " (service " + svc + ")", check: func(ctx context.Context) (swarm.Health, error) {
 				return swarm.CheckService(ctx, c.opts.Docker, svc)

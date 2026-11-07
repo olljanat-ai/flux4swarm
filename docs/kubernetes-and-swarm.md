@@ -55,11 +55,10 @@ Swarm has no traffic shifting, but it can roll back a failed update.
   side. On Swarm the `Canary` is skipped and its target is updated with
   `FailureAction: rollback`, with `spec.analysis.interval` as the update
   monitor period. This is the recommended tool for mixed setups.
-* **Argo Rollouts**: a `Rollout` with its own pod template runs on Swarm as
-  a Deployment would (rolling update, start first) with automatic rollback.
-  A `Rollout` with `workloadRef` runs the referenced Deployment with the
-  Rollout's `replicas`, because Argo scales that Deployment itself to
-  zero. Canary and blue/green steps are ignored with a warning.
+* **Argo Rollouts** replaces the Deployment with a `Rollout`, which is a
+  kind Swarm does not run: it is skipped, and a workload converted to a
+  Rollout disappears from Swarm (prune removes its service). Keep a plain
+  Deployment in the Swarm overlay, or use Flagger, while Swarm is live.
 * A manual canary with several weighted `backendRefs` in an HTTPRoute uses
   only the first backend on Swarm (warning): Traefik's Docker provider has
   no weighted services.

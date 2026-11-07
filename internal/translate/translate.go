@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package translate turns Kubernetes workloads (Deployment, StatefulSet,
-// DaemonSet, Job, Argo Rollout) and their Services, ConfigMaps, Secrets and
+// DaemonSet, Job) and their Services, ConfigMaps, Secrets and
 // PersistentVolumeClaims into Docker Swarm services, configs, secrets and
 // networks. A Kubernetes namespace becomes a Docker stack.
 package translate
@@ -71,16 +71,10 @@ type Workload struct {
 
 	// Unsupported lists workload fields that have no Swarm equivalent.
 	Unsupported []string
-	// Rollout is the Argo Rollouts strategy ("canary", "blueGreen") of a
-	// Rollout, or of the Rollout that references this Deployment.
-	Rollout string
-	// RolloutRef names the Rollout that manages this Deployment through
-	// spec.workloadRef.
-	RolloutRef string
 	// Canary is the Flagger Canary that targets this workload.
 	Canary string
 	// Rollback makes a failed Swarm update roll back automatically, which
-	// is what Argo Rollouts and Flagger do on Kubernetes.
+	// is what Flagger does on Kubernetes.
 	Rollback bool
 	// Monitor is how long Swarm watches each updated task for failure.
 	Monitor time.Duration
@@ -188,18 +182,6 @@ func Workloads(set *api.Set) []*Workload {
 			Annotations: j.Annotations, Template: j.Spec.Template, Completions: j.Spec.Completions,
 			Parallelism: j.Spec.Parallelism, BackoffLimit: j.Spec.BackoffLimit, Unsupported: un})
 	}
-	// A Rollout with its own pod template runs like a Deployment with a
-	// rolling update; one with workloadRef reuses the referenced Deployment.
-	refs := map[string]*api.Rollout{}
-	for _, r := range set.Rollouts {
-		if wr := r.Spec.WorkloadRef; wr != nil {
-			refs[api.TargetKey(wr.Kind, r.Metadata.Namespace, wr.Name)] = r
-			continue
-		}
-		out = append(out, &Workload{Kind: api.KindRollout, Namespace: r.Metadata.Namespace, Name: r.Metadata.Name,
-			Labels: r.Metadata.Labels, Annotations: r.Metadata.Annotations, Template: r.Spec.Template,
-			Replicas: r.Spec.Replicas, Strategy: &appsv1.DeploymentStrategy{}, Rollout: r.Strategy(), Rollback: true})
-	}
 	canaries := map[string]api.Canary{}
 	for _, c := range set.Canaries {
 		canaries[api.TargetKey(c.Target.Kind, c.Namespace, c.Target.Name)] = c
@@ -210,17 +192,6 @@ func Workloads(set *api.Set) []*Workload {
 	}
 	for _, w := range out {
 		k := api.TargetKey(w.Kind, w.Namespace, w.Name)
-		if r := refs[k]; r != nil {
-			w.RolloutRef, w.Rollout, w.Rollback = r.Metadata.Name, r.Strategy(), true
-			// Argo scales the referenced Deployment down; the Rollout's
-			// replicas are what should run.
-			if r.Spec.Replicas != nil {
-				w.Replicas = r.Spec.Replicas
-			} else {
-				one := int32(1)
-				w.Replicas = &one
-			}
-		}
 		if c, ok := canaries[k]; ok {
 			w.Canary, w.Rollback, w.Monitor = c.Object, true, c.Interval
 		}
@@ -285,11 +256,6 @@ func Translate(in Input) (*Output, error) {
 		t.pvcs[p.Namespace+"/"+p.Name] = p
 	}
 	seen := map[string]string{}
-	for _, r := range in.Set.Rollouts {
-		if wr := r.Spec.WorkloadRef; wr != nil && wr.Kind != "Deployment" {
-			t.warn("Rollout %s/%s: workloadRef kind %s is not supported on Swarm; the Rollout was ignored", r.Metadata.Namespace, r.Metadata.Name, wr.Kind)
-		}
-	}
 	for _, p := range in.Set.PVCs {
 		t.pvcWarnings("PersistentVolumeClaim "+p.Namespace+"/"+p.Name, p)
 	}
@@ -486,7 +452,7 @@ func (t *translator) workload(w *Workload) (*swarmapply.Service, error) {
 			}
 		}
 	}
-	// Argo Rollouts and Flagger roll back a failed release; Swarm can do
+	// Flagger rolls back a failed release; Swarm can do
 	// the same for a failed update.
 	if w.Rollback && w.Kind != "Job" {
 		if spec.UpdateConfig == nil {

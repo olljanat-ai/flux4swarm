@@ -310,9 +310,9 @@ components (`app.kubernetes.io/part-of: flux`) and kinds with no Swarm
 meaning (RBAC, Ingress, CRDs, HPA, ...) are skipped; each skipped object and
 the reason is listed under `skipped` in `/status` and in `reconcile` and
 `diff` output. Fields Swarm cannot run are dropped and listed under
-`warnings`; `--strict` makes them fail the Kustomization instead. Argo
-Rollouts run as Deployments, Flagger Canary and Rollout targets roll back a
-failed update, and autoscaled workloads run `minReplicas`
+`warnings`; `--strict` makes them fail the Kustomization instead. Flagger
+Canary targets roll back a failed update and autoscaled workloads run
+`minReplicas`
 ([details](docs/kubernetes-and-swarm.md)).
 
 ## Git authentication

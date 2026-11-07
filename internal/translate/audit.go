@@ -104,21 +104,9 @@ func (t *translator) audit(w *Workload, c corev1.Container) {
 	}
 }
 
-// deliveryWarnings explains how Argo Rollouts, Flagger and autoscalers
-// were mapped.
+// deliveryWarnings explains how Flagger and autoscalers were mapped.
 func (t *translator) deliveryWarnings(w *Workload) {
 	id := w.Kind + " " + w.Namespace + "/" + w.Name
-	strategy := ""
-	if w.Rollout != "" {
-		strategy = " " + w.Rollout
-	}
-	switch {
-	case w.Kind == api.KindRollout:
-		t.warn("%s:%s steps are not supported on Swarm; it is updated as a rolling update that rolls back on failure", id, strategy)
-	case w.RolloutRef != "":
-		t.warn("%s: managed by Rollout %s (workloadRef);%s steps are not supported on Swarm, it is updated as a rolling update that rolls back on failure",
-			id, w.RolloutRef, strategy)
-	}
 	if w.Canary != "" {
 		t.warn("%s: target of Flagger %s; canary analysis is not supported on Swarm, a failed update rolls back", id, w.Canary)
 	}

@@ -67,11 +67,6 @@ kind: Canary
 metadata: {name: web, namespace: shop}
 spec: {targetRef: {kind: Deployment, name: web}, analysis: {interval: 1m}}
 ---
-apiVersion: argoproj.io/v1alpha1
-kind: Rollout
-metadata: {name: cart, namespace: shop}
-spec: {strategy: {blueGreen: {activeService: cart}}}
----
 apiVersion: v1
 kind: Secret
 metadata: {name: enc, namespace: shop}
@@ -87,9 +82,6 @@ sops: {version: 3.9.0}
 	}
 	if len(s.Canaries) != 1 || s.Canaries[0].Interval.String() != "1m0s" || s.Canaries[0].Target.Name != "web" {
 		t.Errorf("canaries %+v", s.Canaries)
-	}
-	if len(s.Rollouts) != 1 || s.Rollouts[0].Strategy() != "blueGreen" {
-		t.Errorf("rollouts %+v", s.Rollouts)
 	}
 	if len(s.Secrets) != 0 {
 		t.Errorf("SOPS secret was decoded")
