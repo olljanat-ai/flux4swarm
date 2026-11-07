@@ -6,72 +6,135 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
-// TestImport: objects created directly in Swarm are written to Git.
-func TestImport(t *testing.T) {
-	requireController(t)
-	repo := newGitRepo(t)
+const (
+	fixtureGreeting = "hello config"
+	fixtureSecret   = "s3cr3t-in-swarm-only"
+)
 
-	svc, cfg, sec := uniq("imp-svc"), uniq("imp-cfg"), uniq("imp-sec")
-	cleanupObjects(t, "service", svc)
-	cleanupObjects(t, "config", cfg)
-	cleanupObjects(t, "secret", sec)
+// createStackService creates a Swarm service that belongs to stack ns (the
+// way `docker stack deploy` labels it), running imageV1.
+func createStackService(t *testing.T, ns, name string, args ...string) string {
+	t.Helper()
+	svc := swarmServiceName(ns, name)
+	base := []string{"service", "create", "--detach", "--name", svc,
+		"--label", e2eLabel, "--label", stackKey + "=" + ns, "--container-label", stackKey + "=" + ns}
+	base = append(base, args...)
+	docker(t, append(base, imageV1)...)
+	return svc
+}
 
-	docker(t, "service", "create", "--detach", "--name", svc,
-		"--label", e2eLabel, "--label", "app=web", "--env", "GREETING=hello",
-		"--replicas", "1", imageV1)
-	runIn(t, "hello config", "docker", "config", "create", "--label", e2eLabel, cfg, "-")
-	runIn(t, "s3cr3t", "docker", "secret", "create", "--label", e2eLabel, sec, "-")
+// createImportFixture creates, directly in Swarm, a service web in stack ns
+// (label, env, 1 replica) that mounts a config and a secret.
+func createImportFixture(t *testing.T, ns string) string {
+	t.Helper()
+	cleanupStack(t, ns)
+	cfg, sec := ns+"_greeting", ns+"_token"
+	runIn(t, fixtureGreeting, "docker", "config", "create", "--label", e2eLabel, "--label", stackKey+"="+ns, cfg, "-")
+	runIn(t, fixtureSecret, "docker", "secret", "create", "--label", e2eLabel, "--label", stackKey+"="+ns, sec, "-")
+	svc := createStackService(t, ns, "web",
+		"--label", "app=web", "--env", "GREETING=hello", "--replicas", "1",
+		"--config", "source="+cfg+",target="+configMountPath+"/greeting",
+		"--secret", "source="+sec+",target=token")
 	waitServiceRunning(t, svc, 1)
+	return svc
+}
 
-	importToGit(t, repo, "--adopt", "--bootstrap",
-		"--secret-store", "fake", "--secret-store-provider", "fake")
-	repo.pull()
-
-	if _, ok := repo.read(clusterPath + "/flux-system/gotk-sync.yaml"); !ok {
-		t.Errorf("missing %s/flux-system/gotk-sync.yaml (--bootstrap)", clusterPath)
-	}
-	content, ok := repo.read(servicePath(svc))
-	if !ok {
-		t.Fatalf("missing %s; repo tree:\n%s", servicePath(svc), repo.git("ls-files"))
-	}
-	for _, want := range []string{"kind: Service", imageV1, "GREETING=hello"} {
-		if !strings.Contains(content, want) {
-			t.Errorf("%s does not contain %q:\n%s", servicePath(svc), want, content)
+// assertImportedTree checks the files import must write for the fixture.
+func assertImportedTree(t *testing.T, repo *gitRepo, ns string) {
+	t.Helper()
+	for _, f := range []string{fluxSysPath + "/gotk-sync.yaml", fluxSysPath + "/kustomization.yaml",
+		appDir(ns) + "/namespace.yaml", appDir(ns) + "/kustomization.yaml", appDir(ns) + "/secretstore.yaml"} {
+		if _, ok := repo.read(f); !ok {
+			t.Errorf("missing %s", f)
 		}
 	}
-	if !regexp.MustCompile(`Replicas:\s*1\b`).MatchString(content) {
-		t.Errorf("%s does not contain Replicas: 1:\n%s", servicePath(svc), content)
+	content := repo.mustRead(importedDeployment(ns, "web"))
+	for _, want := range []string{"apiVersion: apps/v1", "kind: Deployment", "namespace: " + ns, imageV1, "GREETING", "hello"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("%s does not contain %q:\n%s", importedDeployment(ns, "web"), want, content)
+		}
 	}
-	if _, ok := repo.read(configPath(cfg)); !ok {
-		t.Errorf("missing %s", configPath(cfg))
+	if !regexp.MustCompile(`replicas:\s*1\b`).MatchString(content) {
+		t.Errorf("%s does not contain replicas: 1:\n%s", importedDeployment(ns, "web"), content)
 	}
-	// Secret contents are intentionally not asserted (must not be plaintext).
-	if _, ok := repo.read(secretPath(sec)); !ok {
-		t.Errorf("missing %s", secretPath(sec))
+	if !anyFileContains(repo, appDir(ns)+"/configmap-*.yaml", "kind: ConfigMap", fixtureGreeting) {
+		t.Errorf("no %s/configmap-*.yaml with kind ConfigMap and data %q; tree:\n%s", appDir(ns), fixtureGreeting, repo.git("ls-files"))
+	}
+	if !anyFileContains(repo, appDir(ns)+"/externalsecret-*.yaml", "kind: ExternalSecret", "external-secrets.io/v1") {
+		t.Errorf("no %s/externalsecret-*.yaml with an external-secrets.io/v1 ExternalSecret; tree:\n%s", appDir(ns), repo.git("ls-files"))
+	}
+	// Swarm never reveals secret data, and plaintext must not end up in Git.
+	if out, _ := run(t, time.Minute, repo.Work, "git", "grep", "-l", fixtureSecret); out != "" {
+		t.Errorf("secret value found in Git: %s", out)
 	}
 }
 
-// TestRoundTripNoop: import followed by reconcile must not touch the service.
+func anyFileContains(repo *gitRepo, pattern string, wants ...string) bool {
+	for _, f := range repo.glob(pattern) {
+		s, _ := repo.read(f)
+		all := true
+		for _, w := range wants {
+			all = all && strings.Contains(s, w)
+		}
+		if all {
+			return true
+		}
+	}
+	return false
+}
+
+// TestImport: objects created directly in Swarm are written to Git as
+// standard Kubernetes manifests in the Flux bootstrap layout.
+func TestImport(t *testing.T) {
+	requireController(t)
+	repo := newGitRepo(t)
+	ns := uniq("imp")
+	createImportFixture(t, ns)
+
+	importToGit(t, repo, importFlags...)
+	repo.pull()
+	assertImportedTree(t, repo, ns)
+}
+
+// TestRoundTripNoop: import followed by reconcile must not change what runs.
+// The first reconcile adopts the service (adds the flux4swarm management
+// labels to the service, not to the task template), so it may bump the
+// service version once; the task template and the running tasks must stay
+// the same, and a second reconcile must be a true no-op.
 func TestRoundTripNoop(t *testing.T) {
 	requireController(t)
 	repo := newGitRepo(t)
-	svc := uniq("rt")
-	cleanupObjects(t, "service", svc)
-
-	docker(t, "service", "create", "--detach", "--name", svc, "--label", e2eLabel,
-		"--replicas", "1", imageV1)
+	ns := uniq("rt")
+	cleanupStack(t, ns)
+	svc := createStackService(t, ns, "web", "--replicas", "1")
 	waitServiceRunning(t, svc, 1)
 
-	importToGit(t, repo, "--adopt",
-		"--secret-store", "fake", "--secret-store-provider", "fake")
-	before := mustService(t, svc) // after import: --adopt may relabel it
+	importToGit(t, repo, importFlags...)
+	assertReconcileIsNoop(t, repo, svc)
+}
 
+// assertReconcileIsNoop reconciles twice and checks the contract above.
+func assertReconcileIsNoop(t *testing.T, repo *gitRepo, svc string) {
+	t.Helper()
+	tmpl, tasks := taskTemplate(t, svc), runningTasks(t, svc)
+	reconcile(t, repo)
+	if got := taskTemplate(t, svc); got != tmpl {
+		t.Errorf("first reconcile after import changed the task template of %s:\nbefore: %s\nafter:  %s", svc, tmpl, got)
+	}
+	if got := runningTasks(t, svc); got != tasks {
+		t.Errorf("first reconcile after import replaced the tasks of %s: %s -> %s", svc, tasks, got)
+	}
+	if s := mustService(t, svc); s.Spec.Labels[managedByKey] != managedByVal {
+		t.Errorf("service %s not adopted: labels %v", svc, s.Spec.Labels)
+	}
+	before := mustService(t, svc)
 	reconcile(t, repo)
 	after := mustService(t, svc)
 	if after.Version.Index != before.Version.Index || after.UpdatedAt != before.UpdatedAt {
-		t.Fatalf("reconcile after import was not a no-op: version %d -> %d, updatedAt %s -> %s",
+		t.Errorf("second reconcile was not a no-op: version %d -> %d, updatedAt %s -> %s",
 			before.Version.Index, after.Version.Index, before.UpdatedAt, after.UpdatedAt)
 	}
 }

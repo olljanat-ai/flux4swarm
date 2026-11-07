@@ -16,30 +16,39 @@ concurrency:
 jobs:
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
-      # Keep the DinD swarm after the run so failure diagnostics can read it;
-      # the last step tears it down.
+      # Keep the DinD swarm and the kind cluster after the run so failure
+      # diagnostics can read them; the last step tears them down.
       E2E_KEEP: "1"
+      # Swarm (DinD) + kind with stock Flux2, ESO, Gateway API and Traefik CRDs.
+      E2E_K8S: "1"
       E2E_DIND_PORT: "23750"
+      E2E_GIT_PORT: "23780"
+      E2E_STATE_DIR: ${{ runner.temp }}/flux4swarm-e2e
+      KUBECONFIG: ${{ runner.temp }}/flux4swarm-e2e/kubeconfig
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
-          # Uses the controller's go.mod once it exists, else the e2e module's.
+          # The controller's go.mod once it exists (its Go version is the
+          # floor), else the e2e module's.
           go-version-file: ${{ hashFiles('go.mod') != '' && 'go.mod' || 'test/e2e/go.mod' }}
-          # The e2e module has no dependencies (and no go.sum) yet.
-          cache: false
+          cache-dependency-path: |
+            go.sum
+            test/e2e/go.mod
 
       - name: Vet e2e tests
         working-directory: test/e2e
-        run: go vet -tags e2e ./...
+        run: |
+          go vet -tags e2e ./...
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
 
-      - name: Run e2e
+      - name: Run e2e (Swarm + kind/Flux2)
         run: make e2e
 
-      - name: Diagnostics
+      - name: Diagnostics (Swarm)
         if: failure()
         env:
           DOCKER_HOST: tcp://127.0.0.1:23750
@@ -48,10 +57,27 @@ jobs:
           echo "::group::dind logs"; DOCKER_HOST= docker logs --tail 300 flux4swarm-e2e-dind; echo "::endgroup::"
           echo "::group::docker info"; docker info; echo "::endgroup::"
           echo "::group::services"; docker service ls
-          for s in $(docker service ls -q); do docker service ps --no-trunc "$s"; done
+          for s in $(docker service ls -q); do docker service inspect --pretty "$s"; docker service ps --no-trunc "$s"; done
           echo "::endgroup::"
-          echo "::group::configs/secrets"; docker config ls; docker secret ls; echo "::endgroup::"
+          echo "::group::configs/secrets/volumes"; docker config ls; docker secret ls; docker volume ls; echo "::endgroup::"
+
+      - name: Diagnostics (Kubernetes/Flux2)
+        if: failure()
+        run: |
+          set +e
+          export PATH="$PWD/test/e2e/.bin:$PATH"
+          echo "::group::flux get all -A"; flux get all -A; echo "::endgroup::"
+          echo "::group::kubectl get all -A"; kubectl get all -A -o wide; echo "::endgroup::"
+          echo "::group::flux custom resources"; kubectl get gitrepositories,kustomizations -A -o yaml; echo "::endgroup::"
+          echo "::group::ESO / Gateway API objects"; kubectl get externalsecrets,secretstores,httproutes,gateways -A; echo "::endgroup::"
+          echo "::group::events"; kubectl get events -A --sort-by=.lastTimestamp | tail -200; echo "::endgroup::"
+          for c in source-controller kustomize-controller; do
+            echo "::group::$c logs"; kubectl -n flux-system logs deploy/$c --tail 500; echo "::endgroup::"
+          done
+          echo "::group::flux logs (all controllers)"; flux logs --all-namespaces --tail 300; echo "::endgroup::"
+          echo "::group::external-secrets logs"; kubectl -n external-secrets logs deploy/external-secrets --tail 300; echo "::endgroup::"
+          echo "::group::git server logs"; docker logs --tail 300 flux4swarm-e2e-git; echo "::endgroup::"
 
       - name: Tear down
         if: always()
-        run: make e2e-down
+        run: make e2e-down e2e-k8s-down

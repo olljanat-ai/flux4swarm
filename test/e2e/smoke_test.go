@@ -21,7 +21,7 @@ func TestSwarmSmoke(t *testing.T) {
 	}
 
 	name := uniq("smoke")
-	cleanupObjects(t, "service", name)
+	cleanupServices(t, name)
 	docker(t, "service", "create", "--detach", "--name", name, "--label", e2eLabel,
 		"--replicas", "1", imageV1)
 	waitServiceRunning(t, name, 1)
