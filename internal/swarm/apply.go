@@ -142,6 +142,9 @@ type Change struct {
 	Name   string `json:"name"`
 	Action Action `json:"action"`
 	Reason string `json:"reason,omitempty"`
+	// Diff is a unified diff of the live and the desired object, set by
+	// an Applier with Diff (secret values are never shown).
+	Diff string `json:"diff,omitempty"`
 }
 
 func (c Change) String() string {
@@ -168,6 +171,10 @@ func (r *Result) add(kind, name string, a Action, reason string) {
 	r.Changes = append(r.Changes, Change{Kind: kind, Name: name, Action: a, Reason: reason})
 }
 
+func (r *Result) addDiff(kind, name string, a Action, reason, diff string) {
+	r.Changes = append(r.Changes, Change{Kind: kind, Name: name, Action: a, Reason: reason, Diff: diff})
+}
+
 // Applier applies Desired state for one owner.
 type Applier struct {
 	Client       Client
@@ -176,9 +183,12 @@ type Applier struct {
 	DryRun       bool
 	// Force recreates services whose update fails (like Flux's spec.force).
 	Force bool
-	Log   *slog.Logger
+	// Diff fills Change.Diff with a unified diff of what changes.
+	Diff bool
+	Log  *slog.Logger
 
-	hashKey []byte
+	hashKey  []byte
+	netNames map[string]string
 }
 
 type versioned struct {
@@ -399,12 +409,20 @@ func (a *Applier) applyConfigs(ctx context.Context, desired []*Config, res *Resu
 		}
 		out[name] = versioned{id: id, name: vname}
 		action := Created
-		for _, l := range live {
+		var prev *swarm.Config
+		for i, l := range live {
 			if l.Spec.Labels[api.LabelName] == name && a.Owner.owns(l.Spec.Labels) {
 				action = Configured
+				if prev == nil || l.CreatedAt.After(prev.CreatedAt) {
+					prev = &live[i]
+				}
 			}
 		}
-		res.add(KindConfig, name, action, "")
+		diff := ""
+		if a.Diff {
+			diff = configDiff(name, prev, data)
+		}
+		res.addDiff(KindConfig, name, action, "", diff)
 	}
 	return out, nil
 }
@@ -476,13 +494,13 @@ func (a *Applier) applySecrets(ctx context.Context, key []byte, desired []Secret
 			id = r.ID
 		}
 		out[s.Name] = versioned{id: id, name: vname}
-		action := Created
+		action, reason := Created, ""
 		for _, l := range live {
 			if l.Spec.Labels[api.LabelName] == s.Name && a.Owner.owns(l.Spec.Labels) {
-				action = Configured
+				action, reason = Configured, "data changed"
 			}
 		}
-		res.add(KindSecret, s.Name, action, "")
+		res.add(KindSecret, s.Name, action, reason)
 	}
 	return out, nil
 }
@@ -622,7 +640,11 @@ func (a *Applier) applyServices(ctx context.Context, desired []*Service, configs
 				id = r.ID
 			}
 			res.ServiceIDs[name] = id
-			res.add(KindService, name, Created, "")
+			diff := ""
+			if a.Diff {
+				diff = a.serviceDiff(ctx, name, nil, spec)
+			}
+			res.addDiff(KindService, name, Created, "", diff)
 			continue
 		}
 		res.ServiceIDs[name] = cur.ID
@@ -656,7 +678,11 @@ func (a *Applier) applyServices(ctx context.Context, desired []*Service, configs
 				a.log().Warn("service update", "service", name, "warning", w)
 			}
 		}
-		res.add(KindService, name, Configured, reason)
+		diff := ""
+		if a.Diff {
+			diff = a.serviceDiff(ctx, name, &cur.Spec, spec)
+		}
+		res.addDiff(KindService, name, Configured, reason, diff)
 	}
 	return nil
 }

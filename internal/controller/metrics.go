@@ -189,8 +189,11 @@ func (c *Controller) resourceInfo() []resourceState {
 	out := make([]resourceState, 0, len(c.sources)+len(c.kustomization))
 	for _, s := range c.sources {
 		r := resourceState{status: s.status}
-		if s.obj != nil {
-			r.url = s.obj.Spec.URL
+		switch o := s.obj.(type) {
+		case *api.GitRepository:
+			r.url = o.Spec.URL
+		case *api.OCIRepository:
+			r.url = o.Spec.URL
 		}
 		out = append(out, r)
 	}
