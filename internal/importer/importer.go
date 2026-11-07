@@ -97,8 +97,29 @@ type Result struct {
 	// writing so that removed objects disappear.
 	Clean []string
 	Notes []string
+	// Skipped lists the Swarm objects that were not exported, and why.
+	Skipped []Skipped
 	// Desired is the Swarm state the export renders to, for AdoptLabels.
 	Desired *swarmapply.Desired
+}
+
+// Skipped is a Swarm object that was not exported.
+type Skipped struct {
+	Kind   string `json:"kind"`
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+func (s Skipped) String() string { return s.Kind + "/" + s.Name + " (" + s.Reason + ")" }
+
+// Reasons for Skipped.
+const (
+	SkippedExcluded = "matches --exclude"
+	SkippedUnused   = "unused version of a flux4swarm managed object"
+)
+
+func (e *exporter) skipped(kind, name, reason string) {
+	e.res.Skipped = append(e.res.Skipped, Skipped{Kind: kind, Name: name, Reason: reason})
 }
 
 // AppsDir is the directory, relative to the cluster directory, with the
@@ -250,6 +271,7 @@ func (e *exporter) run(ctx context.Context, c Client) error {
 	}
 	for _, s := range services {
 		if e.o.skip(s.Spec.Name) {
+			e.skipped(swarmapply.KindService, s.Spec.Name, SkippedExcluded)
 			continue
 		}
 		if err := e.service(s, netNames, configByID, secretByID, allMW); err != nil {
@@ -257,17 +279,41 @@ func (e *exporter) run(ctx context.Context, c Client) error {
 		}
 	}
 	// Configs and secrets that no service uses.
-	for _, cf := range configByID {
+	for _, cf := range configs {
+		cf := configByID[cf.ID]
 		name := logicalName(cf.Spec.Name, cf.Spec.Labels)
-		if _, done := e.cmKeys[name]; done || e.o.skip(name) || cf.Spec.Labels[api.LabelName] != "" {
+		if _, done := e.cmKeys[name]; done {
+			continue
+		}
+		if e.o.skip(name) {
+			e.skipped(swarmapply.KindConfig, cf.Spec.Name, SkippedExcluded)
+			continue
+		}
+		if cf.Spec.Labels[api.LabelName] != "" {
+			e.skipped(swarmapply.KindConfig, cf.Spec.Name, SkippedUnused)
 			continue
 		}
 		ns, short := splitNS(name, cf.Spec.Labels)
 		e.configMap(ns, short, path.Base(short), cf)
 	}
+	usedSecrets := map[string]bool{}
+	for _, svc := range services {
+		if cs := svc.Spec.TaskTemplate.ContainerSpec; cs != nil && !e.o.skip(svc.Spec.Name) {
+			for _, r := range cs.Secrets {
+				usedSecrets[r.SecretID] = true
+			}
+		}
+	}
 	for _, s := range secrets {
 		name := logicalName(s.Spec.Name, s.Spec.Labels)
-		if e.o.skip(name) || s.Spec.Labels[api.LabelName] != "" {
+		if e.o.skip(name) {
+			e.skipped(swarmapply.KindSecret, s.Spec.Name, SkippedExcluded)
+			continue
+		}
+		if s.Spec.Labels[api.LabelName] != "" {
+			if !usedSecrets[s.ID] {
+				e.skipped(swarmapply.KindSecret, s.Spec.Name, SkippedUnused)
+			}
 			continue
 		}
 		ns, short := splitNS(name, s.Spec.Labels)

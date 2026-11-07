@@ -55,10 +55,24 @@ type Set struct {
 	HTTPRoutes  []*gatewayv1.HTTPRoute
 	Middlewares []*TraefikMiddleware
 
-	// Ignored lists "apiVersion Kind namespace/name" of objects that have
-	// no meaning on Swarm.
-	Ignored []string
+	// Ignored lists the objects that are not applied to Swarm, and why.
+	Ignored []IgnoredObject
 }
+
+// IgnoredObject is an object that is not applied to Swarm.
+type IgnoredObject struct {
+	// Object is "apiVersion Kind namespace/name".
+	Object string `json:"object"`
+	Reason string `json:"reason"`
+}
+
+// Reasons for IgnoredObject.
+const (
+	IgnoredFluxComponent = "Flux component (app.kubernetes.io/part-of: flux)"
+	IgnoredAnnotation    = AnnotationIgnore + ": \"true\""
+	IgnoredReconcileOff  = AnnotationReconcile + ": disabled"
+	IgnoredUnsupported   = "kind has no Swarm equivalent"
+)
 
 // SplitYAML splits a multi-document YAML stream.
 func SplitYAML(data []byte) [][]byte {
@@ -121,10 +135,15 @@ func (s *Set) decodeOne(doc []byte, defNS string) error {
 	}
 	id := fmt.Sprintf("%s %s %s/%s", h.APIVersion, h.Kind, h.Metadata.Namespace, h.Metadata.Name)
 	// Flux components (gotk-components.yaml) and explicitly ignored objects.
-	if h.Metadata.Labels["app.kubernetes.io/part-of"] == "flux" ||
-		h.Metadata.Annotations[AnnotationIgnore] == "true" ||
-		h.Metadata.Annotations[AnnotationReconcile] == "disabled" {
-		s.Ignored = append(s.Ignored, id)
+	switch {
+	case h.Metadata.Labels["app.kubernetes.io/part-of"] == "flux":
+		s.ignore(id, IgnoredFluxComponent)
+		return nil
+	case h.Metadata.Annotations[AnnotationIgnore] == "true":
+		s.ignore(id, IgnoredAnnotation)
+		return nil
+	case h.Metadata.Annotations[AnnotationReconcile] == "disabled":
+		s.ignore(id, IgnoredReconcileOff)
 		return nil
 	}
 	group, version := h.APIVersion, ""
@@ -284,9 +303,13 @@ func (s *Set) decodeOne(doc []byte, defNS string) error {
 		o.Metadata.Namespace = ns
 		s.Middlewares = append(s.Middlewares, o)
 	default:
-		s.Ignored = append(s.Ignored, id)
+		s.ignore(id, IgnoredUnsupported)
 	}
 	return nil
+}
+
+func (s *Set) ignore(id, reason string) {
+	s.Ignored = append(s.Ignored, IgnoredObject{Object: id, Reason: reason})
 }
 
 // NamespacedName returns "namespace/name".

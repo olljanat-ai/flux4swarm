@@ -111,7 +111,9 @@ service the export reproduces exactly as owned by the `flux-system`
 Kustomization (`--adopt-owner`), so the first reconcile changes nothing.
 Only labels are changed, so no task restarts. Services that use secrets are
 left for the first reconcile, because their new secret versions are created
-from the secret store.
+from the secret store. Import prints every Swarm object it did not export
+(`skipped: Service/tmp_debug (matches --exclude)`), so nothing is dropped
+silently.
 
 ### Services outside a stack
 
@@ -160,13 +162,59 @@ flux4swarm controller --url oci://ghcr.io/acme/fleet --semver '1.x'
 or the same objects in a `--config` file (`kind: OCIRepository`,
 `spec.ref.semver`, `spec.secretRef` with a `.dockerconfigjson`).
 
+## See drift before applying
+
+`flux4swarm diff` takes the same flags as `reconcile` and prints a unified
+diff of every service and config that would change, like `flux diff
+kustomization`. Docker defaults, IDs and pinned image digests are left out,
+so only real differences show. Secret values are never shown. It exits 0
+when Swarm matches Git, 1 when it differs and 2 on errors, so it works as a
+CI gate.
+
+```console
+$ flux4swarm diff --path ./clusters/prod
+Kustomization flux-system/flux-system:
+► Service/shop_web drifted (spec changed)
+--- live/Service/shop_web
++++ desired/Service/shop_web
+@@ -5,7 +5,7 @@
+ Mode:
+   Replicated:
+-    Replicas: 2
++    Replicas: 1
+  skipped: policy/v1 PodDisruptionBudget shop/web (kind has no Swarm equivalent)
+```
+
+## Manage a running controller
+
+`get`, `suspend` and `resume` talk to a running controller's status API, like
+the flux CLI talks to Kubernetes (`--server`, default
+`http://127.0.0.1:9797` or `FLUX4SWARM_SERVER`):
+
+```sh
+flux4swarm get all                     # or: get kustomizations, get sources git; -A, -o json
+flux4swarm suspend kustomization apps
+flux4swarm resume kustomization apps   # waits until it reconciled (--wait=false to skip)
+flux4swarm suspend source git flux-system
+```
+
+A suspend through the API is kept in memory until `resume` or a controller
+restart; for a lasting one set `spec.suspend: true` in Git (which `resume`
+cannot override). Set `--api-token` (or `FLUX4SWARM_API_TOKEN`) on the
+controller to require `Authorization: Bearer <token>` on the POST endpoints;
+the CLI sends the same variable.
+
+## Deploy
+
 As a Swarm service see [deploy/flux4swarm-stack.yaml](deploy/flux4swarm-stack.yaml).
 Credentials (the `secretRef` of a GitRepository or SecretStore) are files in
 `--credentials-dir` (default `/run/secrets`): `<name>/<key>` or
 `<name>_<key>`, so Docker secrets such as `flux-system_password` work as is.
-Status is served on `:9797`: `/status` (like `flux get all`), `/metrics`
+Status is served on `:9797`: `/status` (like `flux get all`, including the
+`skipped` objects of each Kustomization and why), `/metrics`
 (Flux-compatible Prometheus metrics, see [docs/monitoring.md](docs/monitoring.md)),
-`/healthz`, `/readyz` and `POST /reconcile`.
+`/healthz`, `/readyz`, `POST /reconcile`,
+`POST /suspend/{kind}/{namespace}/{name}` and `POST /resume/...`.
 
 ## Notifications and webhook receivers
 
@@ -253,7 +301,9 @@ Swarm-only settings are annotations on the workload, which Flux ignores:
 `swarm.flux4swarm.io/service-spec` (JSON merge patch on the Docker
 ServiceSpec) and `swarm.flux4swarm.io/ignore`. Flux components
 (`app.kubernetes.io/part-of: flux`) and kinds with no Swarm meaning
-(RBAC, Ingress, CRDs, HPA, ...) are skipped.
+(RBAC, Ingress, CRDs, HPA, ...) are skipped; each skipped object and the
+reason is listed under `skipped` in `/status` and in `reconcile` and `diff`
+output.
 
 ## Git authentication
 

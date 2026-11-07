@@ -23,6 +23,7 @@ Swarm and apply to the Docker Engine API".
                                               4. Kubernetes → Swarm translation
                                               5. apply, wait, prune ──────────▶ Docker Engine API
                                             status: /status /metrics /healthz /readyz
+                                            POST /reconcile /suspend /resume
 ```
 
 ## Modes
@@ -31,6 +32,8 @@ Swarm and apply to the Docker Engine API".
 |------|---------|-----------------|
 | GitOps | `flux4swarm controller`, `flux4swarm reconcile` (one pass) | source-controller + kustomize-controller + notification-controller |
 | Import | `flux4swarm import` | `flux bootstrap` + exporting existing workloads |
+| Diff | `flux4swarm diff` (dry run with a unified spec diff) | `flux diff kustomization` |
+| CLI | `flux4swarm get`, `suspend`, `resume` (over the status API) | `flux get`, `flux suspend`, `flux resume` |
 
 ## Packages
 
@@ -45,7 +48,7 @@ Swarm and apply to the Docker Engine API".
 | `internal/traefik` | HTTPRoute/Middleware ↔ Traefik Swarm provider labels, Traefik rule parser |
 | `internal/translate` | Kubernetes workloads → Swarm service specs, configs, secrets, networks |
 | `internal/render` | traefik + translate for one build |
-| `internal/swarm` | applier: ownership labels, versioned configs/secrets, drift detection, prune, wait |
+| `internal/swarm` | applier: ownership labels, versioned configs/secrets, drift detection and diffs, prune, wait |
 | `internal/swarm/tfdocker` | code derived from terraform-provider-docker (MPL-2.0) |
 | `internal/controller` | reconcile loop, dependency ordering, status and metrics, events and Receiver webhooks |
 | `internal/notify` | notification-controller: Alert matching, Providers (generic, generic-hmac, Slack, Microsoft Teams, GitHub and Azure DevOps commit status), Receiver validation |

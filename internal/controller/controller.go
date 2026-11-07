@@ -42,7 +42,11 @@ type Options struct {
 	CacheDir     string
 	RegistryAuth map[string]registry.AuthConfig
 	DryRun       bool
-	Log          *slog.Logger
+	// Diff records a unified diff in each change (implies DryRun).
+	Diff bool
+	// APIToken, when set, is the bearer token POST endpoints require.
+	APIToken string
+	Log      *slog.Logger
 	// NotifyRateLimit suppresses identical notification events
 	// (notify.DefaultRateLimit when 0, disabled when negative).
 	NotifyRateLimit time.Duration
@@ -109,8 +113,11 @@ type Controller struct {
 	sources       map[string]*sourceState
 	kustomization map[string]*ksState
 	clusterStores map[string]*api.SecretStore
-	trigger       chan struct{}
-	ready         bool
+	// suspended are objects suspended through the API (by status key),
+	// kept in memory on top of spec.suspend.
+	suspended map[string]bool
+	trigger   chan struct{}
+	ready     bool
 
 	// Flux notification objects, Receiver webhook paths and the dispatcher.
 	notif        map[string]*notifState
@@ -127,11 +134,15 @@ func New(o Options) *Controller {
 	if o.Log == nil {
 		o.Log = slog.Default()
 	}
+	if o.Diff {
+		o.DryRun = true
+	}
 	c := &Controller{
 		opts:          o,
 		sources:       map[string]*sourceState{},
 		kustomization: map[string]*ksState{},
 		clusterStores: map[string]*api.SecretStore{},
+		suspended:     map[string]bool{},
 		trigger:       make(chan struct{}, 1),
 		notif:         map[string]*notifState{},
 		hooks:         map[string]string{},
@@ -290,8 +301,8 @@ func (c *Controller) objectCount() int {
 func (c *Controller) allAttempted() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, k := range c.kustomization {
-		if k.status.LastReconcile.IsZero() && !k.obj.Spec.Suspend {
+	for key, k := range c.kustomization {
+		if k.status.LastReconcile.IsZero() && !c.isSuspendedLocked(key, k.obj.Spec.Suspend) {
 			return false
 		}
 	}
@@ -391,9 +402,7 @@ func (c *Controller) reconcileSource(ctx context.Context, key string) {
 	}
 	obj := s.obj
 	cm := commonOf(obj)
-	s.status.Suspended = cm.suspend
-	if cm.suspend {
-		s.status.setReady(ConditionUnknown, ReasonSuspended, "suspended")
+	if c.markSuspendedLocked(key, cm.suspend, &s.status) {
 		s.next = time.Now().Add(interval(cm.interval))
 		c.mu.Unlock()
 		return
@@ -557,7 +566,6 @@ func (c *Controller) reconcileKustomization(ctx context.Context, key string, onc
 	}
 	obj := s.obj
 	log := c.opts.Log.With("kustomization", obj.Metadata.NamespacedName())
-	s.status.Suspended = obj.Spec.Suspend
 	retry := interval(obj.Spec.Interval.Duration)
 	if obj.Spec.RetryInterval != nil {
 		retry = obj.Spec.RetryInterval.Duration
@@ -569,8 +577,7 @@ func (c *Controller) reconcileKustomization(ctx context.Context, key string, onc
 		log.Error("reconciliation failed", "reason", reason, "error", err)
 		c.emitKustomizationFailureLocked(obj, s.status.LastAttemptedRevision, reason, err.Error())
 	}
-	if obj.Spec.Suspend {
-		s.status.setReady(ConditionUnknown, ReasonSuspended, "suspended")
+	if c.markSuspendedLocked(key, obj.Spec.Suspend, &s.status) {
 		s.next = time.Now().Add(interval(obj.Spec.Interval.Duration))
 		c.mu.Unlock()
 		return
@@ -656,6 +663,7 @@ func (c *Controller) reconcileKustomization(ctx context.Context, key string, onc
 		Owner:        swarm.Owner{Name: obj.Metadata.Name, Namespace: obj.Metadata.Namespace},
 		RegistryAuth: c.opts.RegistryAuth,
 		DryRun:       c.opts.DryRun,
+		Diff:         c.opts.Diff,
 		Force:        obj.Spec.Force,
 		Log:          log,
 	}
@@ -670,9 +678,13 @@ func (c *Controller) reconcileKustomization(ctx context.Context, key string, onc
 	s.workloads = workloads
 	c.mu.Unlock()
 	changes := res.Changes
+	appliedMsg, prunedMsg := "applied", "pruned"
+	if c.opts.DryRun {
+		appliedMsg, prunedMsg = "would apply (dry run)", "would prune (dry run)"
+	}
 	for _, ch := range changes {
 		if ch.Action != swarm.Unchanged {
-			log.Info("applied", "object", ch.Kind+"/"+ch.Name, "action", ch.Action, "reason", ch.Reason)
+			log.Info(appliedMsg, "object", ch.Kind+"/"+ch.Name, "action", ch.Action, "reason", ch.Reason)
 		}
 	}
 
@@ -697,7 +709,7 @@ func (c *Controller) reconcileKustomization(ctx context.Context, key string, onc
 
 	pruned, err := applier.Prune(rctx, res, obj.Spec.Prune)
 	for _, ch := range pruned {
-		log.Info("pruned", "object", ch.Kind+"/"+ch.Name, "reason", ch.Reason)
+		log.Info(prunedMsg, "object", ch.Kind+"/"+ch.Name, "reason", ch.Reason)
 	}
 	changes = append(changes, pruned...)
 	if err != nil {
@@ -724,6 +736,10 @@ func (c *Controller) reconcileKustomization(ctx context.Context, key string, onc
 	s.status.LastChanges = changes
 	s.status.Warnings = out.Warnings
 	s.status.Ignored = len(set.Ignored)
+	s.status.Skipped = set.Ignored
+	for _, ig := range set.Ignored {
+		log.Debug("not applied to Swarm", "object", ig.Object, "reason", ig.Reason)
+	}
 	s.status.LastReconcile = time.Now().UTC()
 	s.status.Duration = time.Since(start).Seconds()
 	msg := "Applied revision: " + art.Revision
@@ -794,6 +810,7 @@ func (c *Controller) registerChildren(ctx context.Context, s *ksState, key strin
 			c.removeNotificationLocked(child)
 			c.opts.Log.Info("removed notification object", "object", child)
 		}
+		delete(c.suspended, child)
 		if src, ok := c.sources[child]; ok && src.origin == key {
 			delete(c.sources, child)
 			c.metrics.forget(src.status.Kind, src.status.Namespace, src.status.Name)

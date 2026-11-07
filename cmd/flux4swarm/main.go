@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -89,9 +90,29 @@ func newVersionCmd() *cobra.Command {
 
 func main() {
 	if err := newRoot().Execute(); err != nil {
+		var ex *exitError
+		if errors.As(err, &ex) {
+			if ex.err != nil {
+				fmt.Fprintln(os.Stderr, "error:", ex.err)
+			}
+			os.Exit(ex.code)
+		}
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// exitError exits with code, printing err if it is not nil.
+type exitError struct {
+	code int
+	err  error
+}
+
+func (e *exitError) Error() string {
+	if e.err == nil {
+		return fmt.Sprintf("exit status %d", e.code)
+	}
+	return e.err.Error()
 }
 
 type globalOpts struct {
@@ -125,7 +146,8 @@ func newRoot() *cobra.Command {
 	root.PersistentFlags().StringVar(&g.logFormat, "log-format", "text", "text or json")
 	root.PersistentFlags().StringVar(&g.namespace, "default-namespace", envOr(api.EnvSwarmNamespace, api.SwarmNamespace),
 		"Kubernetes namespace of Swarm objects without a stack (e.g. made with docker service create): import puts them there and reconcile deploys it without a stack prefix (env "+api.EnvSwarmNamespace+")")
-	root.AddCommand(newControllerCmd(false), newControllerCmd(true), newImportCmd(), newVersionCmd())
+	root.AddCommand(newControllerCmd(modeController), newControllerCmd(modeReconcile), newControllerCmd(modeDiff),
+		newImportCmd(), newGetCmd(), newSuspendCmd(true), newSuspendCmd(false), newVersionCmd())
 	return root
 }
 
@@ -198,7 +220,14 @@ func dockerClient() (*client.Client, error) {
 	return client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 }
 
-func newControllerCmd(once bool) *cobra.Command {
+const (
+	modeController = "controller"
+	modeReconcile  = "reconcile"
+	modeDiff       = "diff"
+)
+
+func newControllerCmd(mode string) *cobra.Command {
+	once := mode != modeController
 	var (
 		gf          gitFlags
 		configs     []string
@@ -213,15 +242,24 @@ func newControllerCmd(once bool) *cobra.Command {
 		listen      string
 		receiver    string
 		registryCfg string
+		apiToken    string
 	)
 	cmd := &cobra.Command{
 		Use:   "controller",
 		Short: "Run the GitOps controller (pull Git, apply to Swarm, prune, repeat)",
 		Args:  cobra.NoArgs,
 	}
-	if once {
+	switch mode {
+	case modeReconcile:
 		cmd.Use = "reconcile"
 		cmd.Short = "Reconcile once and exit (non-zero if anything is not Ready)"
+	case modeDiff:
+		cmd.Use = "diff"
+		cmd.Short = "Show a unified diff of what a reconcile would change in Swarm, without changing it"
+		cmd.Long = "Build the source like reconcile --dry-run and print a unified diff of every\n" +
+			"service and config that would change, plus the objects that would be created\n" +
+			"or deleted. Secret values are never shown.\n\n" +
+			"Exit status: 0 no differences, 1 differences found, 2 error (like flux diff)."
 	}
 	gf.register(cmd, "url")
 	cmd.Flags().StringVar(&gf.tag, "tag", "", "Git or OCI tag (instead of --branch)")
@@ -235,12 +273,15 @@ func newControllerCmd(once bool) *cobra.Command {
 	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "apply and health check timeout")
 	cmd.Flags().BoolVar(&prune, "prune", true, "delete Swarm objects removed from the source")
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait for services to converge")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would change without changing Swarm")
+	if mode != modeDiff {
+		cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would change without changing Swarm")
+	}
 	cmd.Flags().StringVar(&credsDir, "credentials-dir", creds.DefaultDir, "directory with credential secrets (<dir>/<name>/<key> or <dir>/<name>_<key>)")
 	cmd.Flags().StringVar(&cacheDir, "cache-dir", filepath.Join(os.TempDir(), "flux4swarm"), "directory for Git checkouts")
 	if !once {
-		cmd.Flags().StringVar(&listen, "listen", ":9797", "address for /healthz, /readyz, /status, /metrics and POST /reconcile")
+		cmd.Flags().StringVar(&listen, "listen", ":9797", "address for /healthz, /readyz, /status, /metrics and POST /reconcile, /suspend and /resume")
 		cmd.Flags().StringVar(&receiver, "receiver-listen", ":9292", "address for Flux Receiver webhooks (/hook/...); empty disables them")
+		cmd.Flags().StringVar(&apiToken, "api-token", "", "bearer token required by the POST endpoints (env FLUX4SWARM_API_TOKEN)")
 	}
 	cmd.Flags().StringVar(&registryCfg, "registry-config", defaultRegistryConfig(), "Docker config.json with registry credentials")
 
@@ -257,13 +298,28 @@ func newControllerCmd(once bool) *cobra.Command {
 		if err != nil {
 			return err
 		}
+		if apiToken == "" {
+			apiToken = os.Getenv("FLUX4SWARM_API_TOKEN")
+		}
 		host, _ := os.Hostname()
 		c := controller.New(controller.Options{
-			Docker: dc, Creds: store, CacheDir: cacheDir, RegistryAuth: auths, DryRun: dryRun, Log: slog.Default(),
+			Docker: dc, Creds: store, CacheDir: cacheDir, RegistryAuth: auths, DryRun: dryRun,
+			Diff: mode == modeDiff, APIToken: apiToken, Log: slog.Default(),
 			Instance: host,
 		})
 		if err := addObjects(c, store, &gf, configs, path, interval, ksInterval, timeout, prune, wait); err != nil {
 			return err
+		}
+		if mode == modeDiff {
+			err := c.ReconcileOnce(ctx)
+			drift := printDiff(os.Stdout, c.Status())
+			if err != nil {
+				return &exitError{code: 2, err: err}
+			}
+			if drift {
+				return &exitError{code: 1}
+			}
+			return nil
 		}
 		if once {
 			err := c.ReconcileOnce(ctx)
@@ -419,7 +475,53 @@ func printStatus(st []controller.ObjectStatus) {
 		for _, w := range s.Warnings {
 			fmt.Printf("  warning: %s\n", w)
 		}
+		for _, ig := range s.Skipped {
+			fmt.Printf("  skipped: %s (%s)\n", ig.Object, ig.Reason)
+		}
 	}
+}
+
+// printDiff prints the changes a dry run with Diff recorded, in the style
+// of `flux diff`, and reports whether anything would change.
+func printDiff(w io.Writer, st []controller.ObjectStatus) bool {
+	drift := false
+	for _, s := range st {
+		if s.Kind != api.KindKustomization {
+			continue
+		}
+		var changed []swarm.Change
+		for _, ch := range s.LastChanges {
+			if ch.Action != swarm.Unchanged {
+				changed = append(changed, ch)
+			}
+		}
+		if len(changed) == 0 && len(s.Warnings) == 0 && len(s.Skipped) == 0 {
+			continue
+		}
+		fmt.Fprintf(w, "Kustomization %s/%s:\n", s.Namespace, s.Name)
+		for _, ch := range changed {
+			drift = true
+			verb := string(ch.Action)
+			if ch.Action == swarm.Configured {
+				verb = "drifted"
+			}
+			line := fmt.Sprintf("► %s/%s %s", ch.Kind, ch.Name, verb)
+			if ch.Reason != "" {
+				line += " (" + ch.Reason + ")"
+			}
+			fmt.Fprintln(w, line)
+			if ch.Diff != "" {
+				fmt.Fprint(w, ch.Diff)
+			}
+		}
+		for _, warn := range s.Warnings {
+			fmt.Fprintf(w, "  warning: %s\n", warn)
+		}
+		for _, ig := range s.Skipped {
+			fmt.Fprintf(w, "  skipped: %s (%s)\n", ig.Object, ig.Reason)
+		}
+	}
+	return drift
 }
 
 func defaultRegistryConfig() string {
@@ -560,6 +662,9 @@ func newImportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+		}
+		for _, sk := range res.Skipped {
+			fmt.Println("skipped:", sk)
 		}
 		for _, n := range res.Notes {
 			fmt.Println("note:", strings.TrimSpace(n))

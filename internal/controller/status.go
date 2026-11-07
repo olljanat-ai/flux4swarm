@@ -6,6 +6,7 @@ package controller
 import (
 	"time"
 
+	"github.com/olljanat-ai/flux4swarm/internal/api"
 	"github.com/olljanat-ai/flux4swarm/internal/swarm"
 )
 
@@ -54,7 +55,13 @@ type ObjectStatus struct {
 	LastChanges           []swarm.Change `json:"lastChanges,omitempty"`
 	Warnings              []string       `json:"warnings,omitempty"`
 	Ignored               int            `json:"ignoredObjects,omitempty"`
-	ManagedBy             string         `json:"managedBy,omitempty"`
+	// Skipped lists the objects of the last build that were not applied
+	// to Swarm, and why.
+	Skipped   []api.IgnoredObject `json:"skipped,omitempty"`
+	ManagedBy string              `json:"managedBy,omitempty"`
+	// SuspendedBy is "spec" for spec.suspend and "api" for a suspend
+	// through the status API.
+	SuspendedBy string `json:"suspendedBy,omitempty"`
 	// WebhookPath of a Receiver.
 	WebhookPath string `json:"webhookPath,omitempty"`
 }
