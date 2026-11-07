@@ -114,3 +114,20 @@ func indent(s, prefix string) string {
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
+
+// When the last service leaves Swarm, apps/ must still exist so an
+// overlay that lists it keeps building.
+func TestValidateEmptySwarm(t *testing.T) {
+	res, err := Export(context.Background(), &fakeDocker{}, Options{Cluster: "prod", Bootstrap: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := res.WriteTo(dir, true); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, "clusters/prod/kustomization.yaml", "resources: [flux-system, apps]\n")
+	if err := Validate(dir, "clusters/prod"); err != nil {
+		t.Fatal(err)
+	}
+}
