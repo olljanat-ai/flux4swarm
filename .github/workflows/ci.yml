@@ -1,9 +1,22 @@
 name: ci
 
 on:
+  # Documentation-only changes do not need a build or the e2e run.
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+      - "LICENSES/**"
+      - "NOTICE"
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+      - "LICENSES/**"
+      - "NOTICE"
 
 permissions:
   contents: read
