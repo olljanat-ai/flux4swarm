@@ -239,16 +239,41 @@ type PushResult struct {
 	Changed bool
 }
 
+// pushAttempts bounds the retries of CommitAndPush when the remote branch
+// moved between the clone and the push.
+var pushAttempts = 5
+
 // CommitAndPush clones the branch (or starts it if the repository or branch
-// is empty), lets Write change files, commits everything and pushes.
+// is empty), lets Write change files, commits everything and pushes. When
+// the push is rejected because someone else pushed first, it starts over
+// from a fresh clone, so Write runs again on top of the new tip.
 //
 // The clone is shallow (depth 1), so the cost of a sync does not grow with
 // the history of the export repository. If the shallow attempt fails for
-// any reason (a server or transport that cannot serve or accept it), the
-// whole sync is retried once with a full clone.
+// any other reason (a server or transport that cannot serve or accept it),
+// the sync is retried once with a full clone.
 func CommitAndPush(ctx context.Context, workDir string, o PushOptions) (*PushResult, error) {
+	for attempt := 1; ; attempt++ {
+		res, err := shallowOrFull(ctx, workDir, o)
+		if err == nil || !isRejected(err) || attempt >= pushAttempts {
+			return res, err
+		}
+		if err := os.RemoveAll(workDir); err != nil {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Duration(attempt) * 200 * time.Millisecond):
+		}
+	}
+}
+
+// shallowOrFull runs one sync with a shallow clone and falls back to a full
+// clone, except when the push lost a race (CommitAndPush retries that).
+func shallowOrFull(ctx context.Context, workDir string, o PushOptions) (*PushResult, error) {
 	res, err := commitAndPush(ctx, workDir, o, 1)
-	if err == nil || ctx.Err() != nil {
+	if err == nil || ctx.Err() != nil || isRejected(err) {
 		return res, err
 	}
 	if rerr := os.RemoveAll(workDir); rerr != nil {
@@ -259,6 +284,31 @@ func CommitAndPush(ctx context.Context, workDir string, o PushOptions) (*PushRes
 		ferr = fmt.Errorf("%w (shallow attempt: %v)", ferr, err)
 	}
 	return res, ferr
+}
+
+// rejectedError marks a push the remote refused because the branch moved.
+type rejectedError struct{ error }
+
+func (e rejectedError) Unwrap() error { return e.error }
+
+func isRejected(err error) bool {
+	var r rejectedError
+	return errors.As(err, &r)
+}
+
+// nonFastForward reports whether a push error means the remote branch has
+// commits the local one lacks.
+func nonFastForward(err error) bool {
+	if errors.Is(err, gogit.ErrNonFastForwardUpdate) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, s := range []string{"non-fast-forward", "fetch first", "rejected"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
 }
 
 func commitAndPush(ctx context.Context, workDir string, o PushOptions, depth int) (*PushResult, error) {
@@ -344,7 +394,11 @@ func commitAndPush(ctx context.Context, workDir string, o PushOptions, depth int
 		RefSpecs:   []config.RefSpec{config.RefSpec(branch + ":" + branch)},
 	})
 	if err != nil && !errors.Is(err, gogit.NoErrAlreadyUpToDate) {
-		return nil, fmt.Errorf("push %s: %w", redact(o.URL), err)
+		err = fmt.Errorf("push %s: %w", redact(o.URL), err)
+		if nonFastForward(err) {
+			err = rejectedError{err}
+		}
+		return nil, err
 	}
 	return &PushResult{Commit: h.String(), Changed: true}, nil
 }

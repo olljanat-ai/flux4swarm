@@ -182,3 +182,56 @@ func TestPushDescribe(t *testing.T) {
 		t.Fatalf("changes: %+v", got)
 	}
 }
+
+func TestPushRetriesWhenBranchMoved(t *testing.T) {
+	ctx := context.Background()
+	bare := filepath.Join(t.TempDir(), "repo.git")
+	if _, err := gogit.PlainInit(bare, true); err != nil {
+		t.Fatal(err)
+	}
+	url := "file://" + bare
+	write := func(name, content string) func(string) error {
+		return func(root string) error {
+			return os.WriteFile(filepath.Join(root, name), []byte(content), 0o644)
+		}
+	}
+	if _, err := CommitAndPush(ctx, filepath.Join(t.TempDir(), "w"), PushOptions{
+		URL: url, Branch: "main", Message: "seed", Write: write("seed.yaml", "seed"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	r, err := CommitAndPush(ctx, filepath.Join(t.TempDir(), "w"), PushOptions{
+		URL: url, Branch: "main", Message: "a",
+		Write: func(root string) error {
+			calls++
+			if calls == 1 {
+				// Another watcher pushes between our clone and our push.
+				if _, err := CommitAndPush(ctx, filepath.Join(t.TempDir(), "w"), PushOptions{
+					URL: url, Branch: "main", Message: "b", Write: write("b.yaml", "b"),
+				}); err != nil {
+					return err
+				}
+			}
+			return write("a.yaml", "a")(root)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Changed || calls != 2 {
+		t.Fatalf("changed=%v calls=%d, want a retry", r.Changed, calls)
+	}
+	art, err := (&Fetcher{URL: url, Ref: Ref{Branch: "main"}, Dir: t.TempDir()}).Fetch(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if art.Commit != r.Commit {
+		t.Fatalf("branch at %s, want %s", art.Commit, r.Commit)
+	}
+	for f, want := range map[string]string{"seed.yaml": "seed", "a.yaml": "a", "b.yaml": "b"} {
+		if b, _ := os.ReadFile(filepath.Join(art.Dir, f)); string(b) != want {
+			t.Errorf("%s = %q, want %q", f, b, want)
+		}
+	}
+}

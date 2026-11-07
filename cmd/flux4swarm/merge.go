@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -66,16 +67,9 @@ DIR/apps or DIR) and writes its overlay to clusters/NAME/apps of the target.`,
 			return err
 		}
 		var res *importer.Result
-		run := func(root string) error {
-			envs, err := loadEnvs(root, specs)
-			if err != nil {
-				return err
-			}
-			res, err = merge.Merge(envs, merge.Options{BasePath: basePath})
-			if err != nil {
-				return err
-			}
-			return res.WriteTo(root, false)
+		run := func(root string) (err error) {
+			res, err = mergeInto(root, specs, basePath)
+			return err
 		}
 		if output != "" {
 			if err := run(output); err != nil {
@@ -166,4 +160,64 @@ func loadEnvs(root string, specs []envSpec) ([]merge.Env, error) {
 		envs = append(envs, merge.Env{Name: s.name, Path: appsPath, Objects: objs})
 	}
 	return envs, nil
+}
+
+// mergeInto rebuilds the shared base and the overlays of specs in root.
+func mergeInto(root string, specs []envSpec, basePath string) (*importer.Result, error) {
+	envs, err := loadEnvs(root, specs)
+	if err != nil {
+		return nil, err
+	}
+	res, err := merge.Merge(envs, merge.Options{BasePath: basePath})
+	if err != nil {
+		return nil, err
+	}
+	return res, res.WriteTo(root, false)
+}
+
+// checkMergeEnvs checks import --merge: the environments sharing the base,
+// in merge order, one of them cluster.
+func checkMergeEnvs(names []string, cluster string) error {
+	specs, err := parseEnvs(names)
+	if err != nil {
+		return errors.New(strings.ReplaceAll(err.Error(), "--env", "--merge"))
+	}
+	found := false
+	for _, s := range specs {
+		if s.dir != "" {
+			return fmt.Errorf("--merge %s=%s: give environment names only", s.name, s.dir)
+		}
+		found = found || s.name == cluster
+	}
+	if !found {
+		return fmt.Errorf("--merge must list --cluster %s", cluster)
+	}
+	return nil
+}
+
+// writeMerged writes one environment's export to root and then regenerates
+// the shared base and the overlays of every environment in envs (merge
+// order) that has clusters/ENV/apps. With fewer than two, the export is
+// left as written.
+func writeMerged(root string, res *importer.Result, keep bool, envs []string, basePath string) ([]string, error) {
+	if err := res.WriteTo(root, keep); err != nil {
+		return nil, err
+	}
+	var specs []envSpec
+	var notes []string
+	for _, n := range envs {
+		if st, err := os.Stat(filepath.Join(root, "clusters", n, importer.AppsDir)); err != nil || !st.IsDir() {
+			notes = append(notes, fmt.Sprintf("environment %s has no export yet; left out of the shared base", n))
+			continue
+		}
+		specs = append(specs, envSpec{name: n})
+	}
+	if len(specs) < 2 {
+		return notes, nil
+	}
+	m, err := mergeInto(root, specs, basePath)
+	if err != nil {
+		return nil, err
+	}
+	return append(notes, m.Notes...), nil
 }

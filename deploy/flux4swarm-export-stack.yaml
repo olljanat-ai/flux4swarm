@@ -10,6 +10,9 @@
 # Port 9797 serves /healthz (fails after --unhealthy-after without a
 # successful export), /status and /metrics; deploy/monitoring scrapes it as
 # tasks.export and alerts on failing exports.
+# With several Swarms sharing a Kustomize base, deploy this on each one with
+# its own --cluster and add the same "--merge", "<env>" list everywhere, e.g.
+# "--merge", "development", "--merge", "acceptance", "--merge", "production".
 version: "3.8"
 services:
   export:
