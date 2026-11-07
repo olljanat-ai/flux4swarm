@@ -1,0 +1,37 @@
+flux4swarm
+Copyright 2026 The flux4swarm Authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+-------------------------------------------------------------------------------
+Third-party code
+-------------------------------------------------------------------------------
+
+1) kreuzwerker/terraform-provider-docker
+   https://github.com/kreuzwerker/terraform-provider-docker
+   Licensed under the Mozilla Public License, Version 2.0 (see LICENSES/MPL-2.0.txt)
+
+   Files in internal/swarm/tfdocker/ are derived from that project (service
+   convergence checking, registry auth selection and Docker Hub hostname
+   helpers in internal/provider/resource_docker_service_funcs.go,
+   internal/provider/provider.go and internal/provider/helpers.go).
+   Those files remain under MPL-2.0 and carry the MPL-2.0 header. Their
+   source code is available in this repository and upstream. MPL-2.0 is a
+   file-level copyleft license and permits combining these files with the
+   Apache-2.0 licensed remainder of this project ("Larger Work", MPL-2.0 s3.3).
+
+2) fluxcd/flux2, fluxcd/source-controller, fluxcd/kustomize-controller
+   https://github.com/fluxcd
+   Licensed under the Apache License, Version 2.0.
+
+   flux4swarm reuses the Flux API shapes (GitRepository, Kustomization),
+   label conventions, revision format and repository layout so that existing
+   Flux knowledge and tooling carry over. The reconciliation design follows
+   the Flux controllers.
+
+3) External Secrets Operator
+   https://github.com/external-secrets/external-secrets
+   Licensed under the Apache License, Version 2.0.
+
+   flux4swarm reads ExternalSecret / SecretStore / ClusterSecretStore
+   manifests in the external-secrets.io/v1 format.
