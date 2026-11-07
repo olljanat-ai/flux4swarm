@@ -7,6 +7,9 @@
 # The export owns clusters/<cluster>/apps only; see
 # docs/kubernetes-and-swarm.md for where Kubernetes-only additions go.
 # --exclude keeps this stack (service and Git credentials) out of the export.
+# Port 9797 serves /healthz (fails after --unhealthy-after without a
+# successful export), /status and /metrics; deploy/monitoring scrapes it as
+# tasks.export and alerts on failing exports.
 version: "3.8"
 services:
   export:

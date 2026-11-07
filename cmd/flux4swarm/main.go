@@ -546,10 +546,12 @@ func newImportCmd() *cobra.Command {
 		email    string
 		credsDir string
 
-		adoptOwner string
-		watch      bool
-		interval   time.Duration
-		debounce   time.Duration
+		adoptOwner     string
+		watch          bool
+		interval       time.Duration
+		debounce       time.Duration
+		listen         string
+		unhealthyAfter time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   "import",
@@ -579,6 +581,8 @@ func newImportCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&watch, "watch", false, "keep running: export again after every Swarm service, config or secret change and every --interval, and commit only when the export differs (Swarm stays the source of truth)")
 	cmd.Flags().DurationVar(&interval, "interval", 10*time.Minute, "with --watch: full resync period")
 	cmd.Flags().DurationVar(&debounce, "debounce", 5*time.Second, "with --watch: wait this long after a Swarm change before exporting, so one stack deploy gives one commit")
+	cmd.Flags().StringVar(&listen, "listen", ":9797", "with --watch: address for /healthz, /readyz, /status and /metrics; empty disables them")
+	cmd.Flags().DurationVar(&unhealthyAfter, "unhealthy-after", 0, "with --watch: /healthz fails and flux4swarm_watch_healthy is 0 when no export succeeded for this long (default 3 x --interval)")
 
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
 		ctx := cmd.Context()
@@ -607,6 +611,8 @@ func newImportCmd() *cobra.Command {
 		if secretName != "" {
 			secret = store.Lookup(secretName, git.SecretKeys...)
 		}
+		// pushed is the commit of the last export that changed Git.
+		var pushed string
 		// export writes the Swarm to --output or Git. In watch mode files
 		// outside the apps directory are only created, never overwritten.
 		export := func(ctx context.Context) (*importer.Result, error) {
@@ -642,6 +648,7 @@ func newImportCmd() *cobra.Command {
 				return nil, err
 			}
 			if pr.Changed {
+				pushed = pr.Commit
 				fmt.Printf("pushed %d files to %s (%s) commit %s\n", len(res.Files), gf.url, gf.branch, pr.Commit)
 			} else {
 				fmt.Printf("no changes; %s (%s) is up to date\n", gf.url, gf.branch)
@@ -654,9 +661,26 @@ func newImportCmd() *cobra.Command {
 			}
 			ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 			defer stop()
+			if unhealthyAfter <= 0 {
+				unhealthyAfter = 3 * interval
+			}
+			status := importer.NewWatchStatus(unhealthyAfter)
+			if listen != "" {
+				srv := &http.Server{Addr: listen, Handler: status.Handler(), ReadHeaderTimeout: 10 * time.Second}
+				go func() {
+					if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+						slog.Error("status server", "error", err)
+					}
+				}()
+				defer func() {
+					shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_ = srv.Shutdown(shutdown)
+				}()
+			}
 			var last string
-			slog.Info("watching Swarm", "path", o.Path, "interval", interval, "debounce", debounce)
-			return importer.Watch(ctx, dc, importer.WatchOptions{Interval: interval, Debounce: debounce, Log: slog.Default()},
+			slog.Info("watching Swarm", "path", o.Path, "interval", interval, "debounce", debounce, "listen", listen, "unhealthy-after", unhealthyAfter)
+			return importer.Watch(ctx, dc, importer.WatchOptions{Interval: interval, Debounce: debounce, Log: slog.Default(), Status: status},
 				func(ctx context.Context, full bool) error {
 					// Cheap check first: the export is deterministic, so an
 					// unchanged hash means Git is already up to date, unless
@@ -671,9 +695,13 @@ func newImportCmd() *cobra.Command {
 							return nil
 						}
 					}
+					pushed = ""
 					res, err := export(ctx)
 					if err != nil {
 						return err
+					}
+					if pushed != "" {
+						status.Committed(pushed)
 					}
 					last = res.Hash()
 					for _, sk := range res.Skipped {
