@@ -90,6 +90,8 @@ type Controller struct {
 	dispatcher   *notify.Dispatcher
 	notifChecked time.Time
 	instance     string
+
+	metrics *metrics
 }
 
 // New returns a Controller.
@@ -108,6 +110,7 @@ func New(o Options) *Controller {
 		instance:      o.Instance,
 	}
 	c.dispatcher = &notify.Dispatcher{Creds: o.Creds, Log: o.Log, RateLimit: o.NotifyRateLimit, OnResult: c.onNotifyResult}
+	c.metrics = newMetrics(c)
 	return c
 }
 
@@ -273,7 +276,7 @@ func (c *Controller) pass(ctx context.Context, force bool) {
 	c.mu.Unlock()
 	sort.Strings(srcKeys)
 	for _, k := range srcKeys {
-		c.reconcileSource(ctx, k)
+		c.timed(k, func() { c.reconcileSource(ctx, k) })
 	}
 
 	for _, k := range c.ksOrder() {
@@ -282,7 +285,7 @@ func (c *Controller) pass(ctx context.Context, force bool) {
 		due := ok && (force || !now.Before(s.next) || c.sourceMovedLocked(s))
 		c.mu.Unlock()
 		if due {
-			c.reconcileKustomization(ctx, k, force)
+			c.timed(k, func() { c.reconcileKustomization(ctx, k, force) })
 		}
 	}
 }
@@ -678,10 +681,12 @@ func (c *Controller) registerChildren(ctx context.Context, s *ksState, key strin
 		}
 		if src, ok := c.sources[child]; ok && src.origin == key {
 			delete(c.sources, child)
+			c.metrics.forget(src.status.Kind, src.status.Namespace, src.status.Name)
 			c.opts.Log.Info("removed source", "object", child)
 		}
 		if ks, ok := c.kustomization[child]; ok && ks.origin == key {
 			delete(c.kustomization, child)
+			c.metrics.forget(ks.status.Kind, ks.status.Namespace, ks.status.Name)
 			c.opts.Log.Info("removed kustomization", "object", child)
 			if ks.obj.Spec.Prune {
 				a := &swarm.Applier{

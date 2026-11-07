@@ -131,7 +131,8 @@ Credentials (the `secretRef` of a GitRepository or SecretStore) are files in
 `--credentials-dir` (default `/run/secrets`): `<name>/<key>` or
 `<name>_<key>`, so Docker secrets such as `flux-system_password` work as is.
 Status is served on `:9797`: `/status` (like `flux get all`), `/metrics`
-(`gotk_reconcile_condition`), `/healthz`, `/readyz` and `POST /reconcile`.
+(Flux-compatible Prometheus metrics, see [docs/monitoring.md](docs/monitoring.md)),
+`/healthz`, `/readyz` and `POST /reconcile`.
 
 ## Notifications and webhook receivers
 
