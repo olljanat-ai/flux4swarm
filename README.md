@@ -133,6 +133,71 @@ Credentials (the `secretRef` of a GitRepository or SecretStore) are files in
 Status is served on `:9797`: `/status` (like `flux get all`), `/metrics`
 (`gotk_reconcile_condition`), `/healthz`, `/readyz` and `POST /reconcile`.
 
+## Notifications and webhook receivers
+
+Put Flux's own notification objects in the repository; stock Flux and
+flux4swarm both use them. Alerts send the Kustomization and GitRepository
+events of flux4swarm to Providers, and Receivers trigger a reconcile when Git
+(or a registry) calls a webhook.
+
+```yaml
+apiVersion: notification.toolkit.fluxcd.io/v1
+kind: Provider
+metadata:
+  name: slack
+  namespace: flux-system
+spec:
+  type: slack             # or msteams, generic, generic-hmac, github, azuredevops
+  channel: deployments
+  secretRef:
+    name: slack-webhook   # key "address" = the webhook URL
+---
+apiVersion: notification.toolkit.fluxcd.io/v1
+kind: Alert
+metadata:
+  name: slack
+  namespace: flux-system
+spec:
+  providerRef:
+    name: slack
+  eventSeverity: info
+  eventSources:
+    - kind: Kustomization
+      name: '*'
+    - kind: GitRepository
+      name: '*'
+---
+apiVersion: notification.toolkit.fluxcd.io/v1
+kind: Receiver
+metadata:
+  name: github
+  namespace: flux-system
+spec:
+  type: github            # or gitlab, bitbucket, generic, generic-hmac, harbor, ...
+  events: ["ping", "push"]
+  secretRef:
+    name: webhook-token   # key "token"
+  resources:
+    - kind: GitRepository
+      name: flux-system
+```
+
+As with Git credentials, the secrets are files in `--credentials-dir`, e.g.
+Docker secrets `slack-webhook_address` and `webhook-token_token`. For commit
+statuses, point a `github` Provider at `https://github.com/acme/fleet`
+(`token` = PAT, or the GitHub App keys) and an `azuredevops` Provider at
+`https://dev.azure.com/acme/platform/_git/fleet` (`token` = PAT, or
+`tenantId`/`clientId`/`clientSecret`), and alert on Kustomizations.
+
+Receivers are served on `--receiver-listen` (default `:9292`, the port of
+Flux's webhook-receiver) at the path Flux computes,
+`/hook/sha256(token+name+namespace)`; `/status` shows it as `webhookPath`.
+Publish only that port to the Git server, not `:9797`. Supported: Provider
+types `generic`, `generic-hmac`, `slack`, `msteams`, `github`,
+`azuredevops`; Receiver types `generic`, `generic-hmac`, `github`, `gitlab`,
+`bitbucket`, `harbor`, `dockerhub`, `quay`, `nexus`, `acr`. CEL expressions
+(`commitStatusExpr`, `resourceFilter`) are not evaluated.
+
 ## How Kubernetes objects map to Swarm
 
 | Kubernetes | Swarm |
@@ -167,7 +232,8 @@ ServiceSpec) and `swarm.flux4swarm.io/ignore`. Flux components
 
 The most Flux compatible option was chosen wherever Swarm differs:
 
-* One process replaces source-controller and kustomize-controller. Status is
+* One process replaces source-controller, kustomize-controller and
+  notification-controller. Status is
   served over HTTP because Swarm has no custom resources.
 * Builds use kustomize like Flux, including the generated
   `kustomization.yaml`, `targetNamespace`, `namePrefix/Suffix`, `patches`,

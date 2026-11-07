@@ -196,6 +196,7 @@ func newControllerCmd(once bool) *cobra.Command {
 		credsDir    string
 		cacheDir    string
 		listen      string
+		receiver    string
 		registryCfg string
 	)
 	cmd := &cobra.Command{
@@ -222,6 +223,7 @@ func newControllerCmd(once bool) *cobra.Command {
 	cmd.Flags().StringVar(&cacheDir, "cache-dir", filepath.Join(os.TempDir(), "flux4swarm"), "directory for Git checkouts")
 	if !once {
 		cmd.Flags().StringVar(&listen, "listen", ":9797", "address for /healthz, /readyz, /status, /metrics and POST /reconcile")
+		cmd.Flags().StringVar(&receiver, "receiver-listen", ":9292", "address for Flux Receiver webhooks (/hook/...); empty disables them")
 	}
 	cmd.Flags().StringVar(&registryCfg, "registry-config", defaultRegistryConfig(), "Docker config.json with registry credentials")
 
@@ -238,8 +240,10 @@ func newControllerCmd(once bool) *cobra.Command {
 		if err != nil {
 			return err
 		}
+		host, _ := os.Hostname()
 		c := controller.New(controller.Options{
 			Docker: dc, Creds: store, CacheDir: cacheDir, RegistryAuth: auths, DryRun: dryRun, Log: slog.Default(),
+			Instance: host,
 		})
 		if err := addObjects(c, store, &gf, configs, path, interval, ksInterval, timeout, prune, wait); err != nil {
 			return err
@@ -255,11 +259,23 @@ func newControllerCmd(once bool) *cobra.Command {
 				slog.Error("status server", "error", err)
 			}
 		}()
-		slog.Info("controller started", "version", version, "commit", commit, "listen", listen)
+		var hooks *http.Server
+		if receiver != "" {
+			hooks = &http.Server{Addr: receiver, Handler: c.ReceiverHandler(), ReadHeaderTimeout: 10 * time.Second}
+			go func() {
+				if err := hooks.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					slog.Error("receiver server", "error", err)
+				}
+			}()
+		}
+		slog.Info("controller started", "version", version, "commit", commit, "listen", listen, "receiver-listen", receiver)
 		err = c.Run(ctx)
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
+		if hooks != nil {
+			_ = hooks.Shutdown(shutdown)
+		}
 		return err
 	}
 	return cmd
@@ -279,8 +295,18 @@ func addObjects(c *controller.Controller, store *creds.Store, gf *gitFlags, conf
 		if err := set.Decode(f, b, api.DefaultNamespace); err != nil {
 			return err
 		}
-		if len(set.GitRepositories)+len(set.Kustomizations) == 0 {
-			return fmt.Errorf("%s has no GitRepository or Kustomization", f)
+		if len(set.GitRepositories)+len(set.Kustomizations)+len(set.Providers)+len(set.Alerts)+len(set.Receivers) == 0 {
+			return fmt.Errorf("%s has no GitRepository, Kustomization, Provider, Alert or Receiver", f)
+		}
+		// Providers first, so Alerts find them.
+		for _, p := range set.Providers {
+			_ = c.AddNotification(p)
+		}
+		for _, r := range set.Receivers {
+			_ = c.AddNotification(r)
+		}
+		for _, a := range set.Alerts {
+			_ = c.AddNotification(a)
 		}
 		for _, r := range set.GitRepositories {
 			c.AddGitRepository(r)

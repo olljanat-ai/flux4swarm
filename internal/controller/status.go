@@ -54,6 +54,8 @@ type ObjectStatus struct {
 	Warnings              []string       `json:"warnings,omitempty"`
 	Ignored               int            `json:"ignoredObjects,omitempty"`
 	ManagedBy             string         `json:"managedBy,omitempty"`
+	// WebhookPath of a Receiver.
+	WebhookPath string `json:"webhookPath,omitempty"`
 }
 
 func (s *ObjectStatus) setReady(status, reason, msg string) {
