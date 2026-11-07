@@ -1,0 +1,36 @@
+# Runs the flux4swarm controller as a Swarm service:
+#   docker secret create flux-system_username - <<< "git"
+#   docker secret create flux-system_password - <<< "<PAT>"
+#   docker config create gotk-sync clusters/prod/flux-system/gotk-sync.yaml
+#   docker stack deploy -c deploy/flux4swarm-stack.yaml flux-system
+# The secret names follow the GitRepository secretRef: <secretRef>_<key>.
+version: "3.8"
+services:
+  controller:
+    image: ghcr.io/olljanat-ai/flux4swarm:latest
+    command: ["controller", "--config", "/etc/flux4swarm/gotk-sync.yaml", "--log-format", "json"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - cache:/tmp/flux4swarm
+    configs:
+      - source: gotk-sync
+        target: /etc/flux4swarm/gotk-sync.yaml
+    secrets:
+      - flux-system_username
+      - flux-system_password
+    ports:
+      - "9797:9797"
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+configs:
+  gotk-sync:
+    external: true
+secrets:
+  flux-system_username:
+    external: true
+  flux-system_password:
+    external: true
+volumes:
+  cache: {}
