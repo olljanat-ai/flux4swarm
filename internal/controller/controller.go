@@ -1,7 +1,8 @@
 // Copyright 2026 The flux4swarm Authors
 // SPDX-License-Identifier: Apache-2.0
 
-// Package controller runs the GitRepository and Kustomization reconcilers.
+// Package controller runs the GitRepository, OCIRepository and Kustomization
+// reconcilers.
 package controller
 
 import (
@@ -22,8 +23,10 @@ import (
 	"github.com/olljanat-ai/flux4swarm/internal/creds"
 	"github.com/olljanat-ai/flux4swarm/internal/git"
 	"github.com/olljanat-ai/flux4swarm/internal/notify"
+	"github.com/olljanat-ai/flux4swarm/internal/oci"
 	"github.com/olljanat-ai/flux4swarm/internal/render"
 	"github.com/olljanat-ai/flux4swarm/internal/secrets"
+	"github.com/olljanat-ai/flux4swarm/internal/source"
 	"github.com/olljanat-ai/flux4swarm/internal/swarm"
 	"github.com/olljanat-ai/flux4swarm/internal/translate"
 )
@@ -48,13 +51,38 @@ type Options struct {
 }
 
 type sourceState struct {
-	obj      *api.GitRepository
+	// obj is a *api.GitRepository or *api.OCIRepository.
+	obj      any
 	localDir string
 	origin   string
-	fetcher  *git.Fetcher
-	artifact *git.Artifact
+	fetcher  fetcher
+	artifact *source.Artifact
 	status   ObjectStatus
 	next     time.Time
+}
+
+// fetcher is implemented by git.Fetcher and oci.Fetcher.
+type fetcher interface {
+	Fetch(ctx context.Context, last *source.Artifact) (*source.Artifact, error)
+}
+
+// sourceCommon is what every source kind has.
+type sourceCommon struct {
+	kind     string
+	meta     api.ObjectMeta
+	interval time.Duration
+	timeout  *api.Duration
+	suspend  bool
+}
+
+func commonOf(obj any) sourceCommon {
+	switch o := obj.(type) {
+	case *api.GitRepository:
+		return sourceCommon{api.KindGitRepository, o.Metadata, o.Spec.Interval.Duration, o.Spec.Timeout, o.Spec.Suspend}
+	case *api.OCIRepository:
+		return sourceCommon{api.KindOCIRepository, o.Metadata, o.Spec.Interval.Duration, o.Spec.Timeout, o.Spec.Suspend}
+	}
+	panic(fmt.Sprintf("unknown source type %T", obj))
 }
 
 type ksState struct {
@@ -123,6 +151,13 @@ func (c *Controller) AddGitRepository(r *api.GitRepository) {
 	c.upsertSource(r, bootstrapOrigin)
 }
 
+// AddOCIRepository registers a bootstrap OCIRepository.
+func (c *Controller) AddOCIRepository(r *api.OCIRepository) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.upsertSource(r, bootstrapOrigin)
+}
+
 // AddLocalSource registers a local directory as a source.
 func (c *Controller) AddLocalSource(name, dir string) {
 	c.mu.Lock()
@@ -143,11 +178,13 @@ func (c *Controller) AddKustomization(k *api.Kustomization) {
 	c.upsertKustomization(k, bootstrapOrigin)
 }
 
-func (c *Controller) upsertSource(r *api.GitRepository, origin string) string {
-	k := srcKey(api.KindGitRepository, r.Metadata.Namespace, r.Metadata.Name)
+// upsertSource registers a *api.GitRepository or *api.OCIRepository.
+func (c *Controller) upsertSource(r any, origin string) string {
+	cm := commonOf(r)
+	k := srcKey(cm.kind, cm.meta.Namespace, cm.meta.Name)
 	s, ok := c.sources[k]
 	if !ok {
-		s = &sourceState{origin: origin, status: ObjectStatus{Kind: api.KindGitRepository, Namespace: r.Metadata.Namespace, Name: r.Metadata.Name}}
+		s = &sourceState{origin: origin, status: ObjectStatus{Kind: cm.kind, Namespace: cm.meta.Namespace, Name: cm.meta.Name}}
 		c.sources[k] = s
 	} else if specChanged(s.obj, r) {
 		s.next = time.Time{}
@@ -340,7 +377,7 @@ func (c *Controller) sourceForLocked(ks *api.Kustomization) *sourceState {
 	return c.sources[srcKey(kind, ns, ref.Name)]
 }
 
-// ---- GitRepository ----
+// ---- GitRepository and OCIRepository ----
 
 func (c *Controller) reconcileSource(ctx context.Context, key string) {
 	c.mu.Lock()
@@ -350,15 +387,16 @@ func (c *Controller) reconcileSource(ctx context.Context, key string) {
 		return
 	}
 	obj := s.obj
-	s.status.Suspended = obj.Spec.Suspend
-	if obj.Spec.Suspend {
+	cm := commonOf(obj)
+	s.status.Suspended = cm.suspend
+	if cm.suspend {
 		s.status.setReady(ConditionUnknown, ReasonSuspended, "suspended")
-		s.next = time.Now().Add(interval(obj.Spec.Interval.Duration))
+		s.next = time.Now().Add(interval(cm.interval))
 		c.mu.Unlock()
 		return
 	}
 	if s.localDir != "" {
-		s.artifact = &git.Artifact{Dir: s.localDir, Revision: "local@" + s.localDir}
+		s.artifact = &source.Artifact{Dir: s.localDir, Revision: "local@" + s.localDir}
 		s.status.Revision = s.artifact.Revision
 		s.status.LastReconcile = time.Now().UTC()
 		s.status.setReady(ConditionTrue, ReasonSucceeded, "local directory "+s.localDir)
@@ -366,62 +404,136 @@ func (c *Controller) reconcileSource(ctx context.Context, key string) {
 		c.mu.Unlock()
 		return
 	}
+	failReason, okMsg := ReasonGitOperationFailed, "stored artifact for revision '%s'"
+	if cm.kind == api.KindOCIRepository {
+		failReason, okMsg = ReasonOCIPullFailed, "stored artifact for digest '%s'"
+	}
+	log := c.opts.Log.With(strings.ToLower(cm.kind), cm.meta.NamespacedName())
 	if s.fetcher == nil {
-		var auth *git.AuthProvider
-		secret := map[string][]byte{}
-		if obj.Spec.SecretRef != nil {
-			secret = c.opts.Creds.Lookup(obj.Spec.SecretRef.Name, git.SecretKeys...)
+		f, err := c.newFetcher(obj)
+		if err != nil {
+			s.status.LastReconcile = time.Now().UTC()
+			s.next = time.Now().Add(interval(cm.interval))
+			log.Error("invalid source", "error", err)
+			s.status.setReady(ConditionFalse, failReason, err.Error())
+			c.mu.Unlock()
+			return
 		}
-		if obj.Spec.SecretRef != nil || obj.Spec.Provider != "" {
-			auth = &git.AuthProvider{Provider: obj.Spec.Provider, URL: obj.Spec.URL, Secret: secret}
-		}
-		ref := git.Ref{}
-		if r := obj.Spec.Ref; r != nil {
-			ref = git.Ref{Branch: r.Branch, Tag: r.Tag, Name: r.Name, Commit: r.Commit}
-		}
-		s.fetcher = &git.Fetcher{
-			URL:  obj.Spec.URL,
-			Ref:  ref,
-			Auth: auth,
-			Dir:  filepath.Join(c.opts.CacheDir, "gitrepository", obj.Metadata.Namespace+"-"+obj.Metadata.Name),
-		}
+		s.fetcher = f
 	}
 	f, last := s.fetcher, s.artifact
 	c.mu.Unlock()
 
 	start := time.Now()
 	timeout := time.Minute
-	if obj.Spec.Timeout != nil {
-		timeout = obj.Spec.Timeout.Duration
+	if cm.timeout != nil {
+		timeout = cm.timeout.Duration
 	}
 	fctx, cancel := context.WithTimeout(ctx, timeout)
-	var art *git.Artifact
-	var err error
-	if obj.Spec.Ref != nil && obj.Spec.Ref.SemVer != "" {
-		err = fmt.Errorf("spec.ref.semver is not supported")
-	} else {
-		art, err = f.Fetch(fctx, last)
-	}
+	art, err := f.Fetch(fctx, last)
 	cancel()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	s.status.LastReconcile = time.Now().UTC()
 	s.status.Duration = time.Since(start).Seconds()
-	s.next = time.Now().Add(interval(obj.Spec.Interval.Duration))
+	s.next = time.Now().Add(interval(cm.interval))
 	if err != nil {
-		c.opts.Log.Error("fetch failed", "gitrepository", obj.Metadata.NamespacedName(), "error", err)
-		s.status.setReady(ConditionFalse, ReasonGitOperationFailed, err.Error())
-		c.emitSourceLocked(s, notify.SeverityError, ReasonGitOperationFailed, err.Error(), "")
+		log.Error("fetch failed", "error", err)
+		s.status.setReady(ConditionFalse, failReason, err.Error())
+		c.emitSourceLocked(s, notify.SeverityError, failReason, err.Error(), "")
 		return
 	}
 	if last == nil || last.Revision != art.Revision {
-		c.opts.Log.Info("fetched revision", "gitrepository", obj.Metadata.NamespacedName(), "revision", art.Revision)
-		c.emitSourceLocked(s, notify.SeverityInfo, ReasonNewArtifact, "stored artifact for revision '"+art.Revision+"'", art.Revision)
+		log.Info("fetched revision", "revision", art.Revision)
+		c.emitSourceLocked(s, notify.SeverityInfo, ReasonNewArtifact, fmt.Sprintf(okMsg, art.Revision), art.Revision)
 	}
 	s.artifact = art
 	s.status.Revision = art.Revision
-	s.status.setReady(ConditionTrue, ReasonSucceeded, "stored artifact for revision '"+art.Revision+"'")
+	s.status.setReady(ConditionTrue, ReasonSucceeded, fmt.Sprintf(okMsg, art.Revision))
+}
+
+// newFetcher builds the fetcher of a source. c.mu must be held.
+func (c *Controller) newFetcher(obj any) (fetcher, error) {
+	switch o := obj.(type) {
+	case *api.GitRepository:
+		var auth *git.AuthProvider
+		secret := map[string][]byte{}
+		if o.Spec.SecretRef != nil {
+			secret = c.opts.Creds.Lookup(o.Spec.SecretRef.Name, git.SecretKeys...)
+		}
+		if o.Spec.SecretRef != nil || o.Spec.Provider != "" {
+			auth = &git.AuthProvider{Provider: o.Spec.Provider, URL: o.Spec.URL, Secret: secret}
+		}
+		ref := git.Ref{}
+		if r := o.Spec.Ref; r != nil {
+			ref = git.Ref{Branch: r.Branch, Tag: r.Tag, SemVer: r.SemVer, Name: r.Name, Commit: r.Commit}
+		}
+		return &git.Fetcher{
+			URL:  o.Spec.URL,
+			Ref:  ref,
+			Auth: auth,
+			Dir:  filepath.Join(c.opts.CacheDir, "gitrepository", o.Metadata.Namespace+"-"+o.Metadata.Name),
+		}, nil
+	case *api.OCIRepository:
+		return c.newOCIFetcher(o)
+	}
+	return nil, fmt.Errorf("unknown source type %T", obj)
+}
+
+func (c *Controller) newOCIFetcher(o *api.OCIRepository) (*oci.Fetcher, error) {
+	if p := o.Spec.Provider; p != "" && p != "generic" {
+		return nil, fmt.Errorf("spec.provider %q is not supported, use generic with spec.secretRef", p)
+	}
+	if o.Spec.Verify != nil {
+		return nil, errors.New("spec.verify is not supported")
+	}
+	host, _, err := oci.ParseURL(o.Spec.URL)
+	if err != nil {
+		return nil, err
+	}
+	f := &oci.Fetcher{
+		URL:      o.Spec.URL,
+		Insecure: o.Spec.Insecure,
+		Dir:      filepath.Join(c.opts.CacheDir, "ocirepository", o.Metadata.Namespace+"-"+o.Metadata.Name),
+	}
+	if r := o.Spec.Ref; r != nil {
+		f.Ref = oci.Ref{Digest: r.Digest, SemVer: r.SemVer, SemverFilter: r.SemverFilter, Tag: r.Tag}
+	}
+	if ls := o.Spec.LayerSelector; ls != nil {
+		if ls.Operation != "" && ls.Operation != "extract" {
+			return nil, fmt.Errorf("spec.layerSelector.operation %q is not supported, only extract", ls.Operation)
+		}
+		f.MediaType = ls.MediaType
+	}
+	if o.Spec.SecretRef != nil {
+		secret := c.opts.Creds.Lookup(o.Spec.SecretRef.Name, oci.SecretKeys...)
+		if len(secret) == 0 {
+			return nil, fmt.Errorf("secret '%s' not found in the credentials directory", o.Spec.SecretRef.Name)
+		}
+		if f.Creds, err = oci.CredentialsFromSecret(secret, host); err != nil {
+			return nil, err
+		}
+	} else {
+		// Fall back to the controller's own registry credentials
+		// (--registry-config), which Swarm uses to pull images anyway.
+		for k, a := range c.opts.RegistryAuth {
+			if oci.NormalizeHost(k) == oci.NormalizeHost(host) {
+				f.Creds = oci.Credentials{Username: a.Username, Password: a.Password, IdentityToken: a.IdentityToken, RegistryToken: a.RegistryToken}
+				break
+			}
+		}
+	}
+	if o.Spec.CertSecretRef != nil {
+		secret := c.opts.Creds.Lookup(o.Spec.CertSecretRef.Name, oci.SecretKeys...)
+		if f.TLS, err = oci.TLSFromSecret(secret); err != nil {
+			return nil, err
+		}
+		if f.TLS == nil {
+			return nil, fmt.Errorf("certSecretRef '%s' has no ca.crt or tls.crt", o.Spec.CertSecretRef.Name)
+		}
+	}
+	return f, nil
 }
 
 func interval(d time.Duration) time.Duration {
@@ -649,6 +761,9 @@ func deadline(ctx context.Context, fallback time.Duration) time.Time {
 func (c *Controller) registerChildren(ctx context.Context, s *ksState, key string, set *api.Set, prune bool) {
 	now := map[string]bool{}
 	for _, r := range set.GitRepositories {
+		now[c.upsertSource(r, key)] = true
+	}
+	for _, r := range set.OCIRepositories {
 		now[c.upsertSource(r, key)] = true
 	}
 	for _, k := range set.Kustomizations {

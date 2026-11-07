@@ -281,7 +281,7 @@ func (c *Controller) emitSourceLocked(s *sourceState, severity, reason, msg, rev
 		action = notify.ActionFailed
 	}
 	c.emitLocked(notify.ObjectReference{Kind: s.status.Kind, APIVersion: api.SourceGroupVersion},
-		s.obj.Metadata, sourceController, severity, reason, action, msg, m)
+		commonOf(s.obj).meta, sourceController, severity, reason, action, msg, m)
 }
 
 // isNotificationKind reports kinds whose status does not fail a one-shot
@@ -373,9 +373,9 @@ func (c *Controller) requestReconcile(kind, ns, name string, labels map[string]s
 		return meta.Name == name
 	}
 	for _, s := range c.sources {
-		if s.localDir == "" && match(s.status, s.obj.Metadata) {
+		if s.localDir == "" && match(s.status, commonOf(s.obj).meta) {
 			s.next = time.Time{}
-			hit = append(hit, s.obj.Metadata.Name)
+			hit = append(hit, commonOf(s.obj).meta.Name)
 		}
 	}
 	for _, k := range c.kustomization {

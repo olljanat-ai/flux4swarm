@@ -146,6 +146,8 @@ func setupLogging(g *globalOpts) error {
 // gitFlags are shared by the controller and import commands.
 type gitFlags struct {
 	url, branch, tag, commit string
+	semver                   string
+	insecure                 bool
 	secretRef, provider      string
 	username, password       string
 	token                    string
@@ -222,8 +224,10 @@ func newControllerCmd(once bool) *cobra.Command {
 		cmd.Short = "Reconcile once and exit (non-zero if anything is not Ready)"
 	}
 	gf.register(cmd, "url")
-	cmd.Flags().StringVar(&gf.tag, "tag", "", "Git tag (instead of --branch)")
+	cmd.Flags().StringVar(&gf.tag, "tag", "", "Git or OCI tag (instead of --branch)")
+	cmd.Flags().StringVar(&gf.semver, "semver", "", "semver range of the Git or OCI tag to use, e.g. '>=1.0.0 <2.0.0' (instead of --branch/--tag)")
 	cmd.Flags().StringVar(&gf.commit, "commit", "", "Git commit SHA")
+	cmd.Flags().BoolVar(&gf.insecure, "insecure", false, "use plain HTTP for an oci:// --url")
 	cmd.Flags().StringArrayVar(&configs, "config", nil, "file with GitRepository and Kustomization objects (repeatable), e.g. clusters/prod/flux-system/gotk-sync.yaml")
 	cmd.Flags().StringVar(&path, "path", "", "path in the repository to apply; without --url a local directory")
 	cmd.Flags().DurationVar(&interval, "interval", time.Minute, "source fetch interval")
@@ -308,8 +312,8 @@ func addObjects(c *controller.Controller, store *creds.Store, gf *gitFlags, conf
 		if err := set.Decode(f, b, api.DefaultNamespace); err != nil {
 			return err
 		}
-		if len(set.GitRepositories)+len(set.Kustomizations)+len(set.Providers)+len(set.Alerts)+len(set.Receivers) == 0 {
-			return fmt.Errorf("%s has no GitRepository, Kustomization, Provider, Alert or Receiver", f)
+		if len(set.GitRepositories)+len(set.OCIRepositories)+len(set.Kustomizations)+len(set.Providers)+len(set.Alerts)+len(set.Receivers) == 0 {
+			return fmt.Errorf("%s has no GitRepository, OCIRepository, Kustomization, Provider, Alert or Receiver", f)
 		}
 		// Providers first, so Alerts find them.
 		for _, p := range set.Providers {
@@ -323,6 +327,9 @@ func addObjects(c *controller.Controller, store *creds.Store, gf *gitFlags, conf
 		}
 		for _, r := range set.GitRepositories {
 			c.AddGitRepository(r)
+		}
+		for _, r := range set.OCIRepositories {
+			c.AddOCIRepository(r)
 		}
 		for _, k := range set.Kustomizations {
 			c.AddKustomization(k)
@@ -356,27 +363,46 @@ func addObjects(c *controller.Controller, store *creds.Store, gf *gitFlags, conf
 		c.AddKustomization(ks)
 		return nil
 	}
-	gr := &api.GitRepository{
-		TypeMeta: api.TypeMeta{APIVersion: api.SourceGroupVersion, Kind: api.KindGitRepository},
-		Metadata: api.ObjectMeta{Name: "flux-system", Namespace: api.DefaultNamespace},
-		Spec: api.GitRepositorySpec{
-			URL:      gf.url,
-			Interval: api.Duration{Duration: interval},
-			Provider: gf.provider,
-			Ref:      &api.GitRepositoryRef{Branch: gf.branch, Tag: gf.tag, Commit: gf.commit},
-		},
-	}
-	if gf.tag != "" {
-		gr.Spec.Ref.Branch = ""
-	}
-	if name := gf.apply(store); name != "" {
-		gr.Spec.SecretRef = &api.LocalObjectReference{Name: name}
-	}
-	c.AddGitRepository(gr)
 	if path == "" {
 		path = "./"
 	}
 	ks.Spec.Path = path
+	var secretRef *api.LocalObjectReference
+	if name := gf.apply(store); name != "" {
+		secretRef = &api.LocalObjectReference{Name: name}
+	}
+	if strings.HasPrefix(gf.url, "oci://") {
+		or := &api.OCIRepository{
+			TypeMeta: api.TypeMeta{APIVersion: api.SourceGroupVersion, Kind: api.KindOCIRepository},
+			Metadata: api.ObjectMeta{Name: "flux-system", Namespace: api.DefaultNamespace},
+			Spec: api.OCIRepositorySpec{
+				URL:       gf.url,
+				Interval:  api.Duration{Duration: interval},
+				Insecure:  gf.insecure,
+				SecretRef: secretRef,
+				Ref:       &api.OCIRepositoryRef{Tag: gf.tag, SemVer: gf.semver},
+			},
+		}
+		c.AddOCIRepository(or)
+		ks.Spec.SourceRef = api.CrossNamespaceObjectReference{Kind: api.KindOCIRepository, Name: "flux-system"}
+		c.AddKustomization(ks)
+		return nil
+	}
+	gr := &api.GitRepository{
+		TypeMeta: api.TypeMeta{APIVersion: api.SourceGroupVersion, Kind: api.KindGitRepository},
+		Metadata: api.ObjectMeta{Name: "flux-system", Namespace: api.DefaultNamespace},
+		Spec: api.GitRepositorySpec{
+			URL:       gf.url,
+			Interval:  api.Duration{Duration: interval},
+			Provider:  gf.provider,
+			Ref:       &api.GitRepositoryRef{Branch: gf.branch, Tag: gf.tag, SemVer: gf.semver, Commit: gf.commit},
+			SecretRef: secretRef,
+		},
+	}
+	if gf.tag != "" || gf.semver != "" {
+		gr.Spec.Ref.Branch = ""
+	}
+	c.AddGitRepository(gr)
 	ks.Spec.SourceRef = api.CrossNamespaceObjectReference{Kind: api.KindGitRepository, Name: "flux-system"}
 	c.AddKustomization(ks)
 	return nil

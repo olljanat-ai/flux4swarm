@@ -41,6 +41,15 @@ for img in $E2E_IMAGES; do
   fi
 done
 
+echo ">> starting OCI registry $E2E_REGISTRY_NAME ($E2E_REGISTRY_IMAGE) on 127.0.0.1:$E2E_REGISTRY_PORT"
+docker rm -f -v "$E2E_REGISTRY_NAME" >/dev/null 2>&1 || true
+docker run -d --name "$E2E_REGISTRY_NAME" -p "127.0.0.1:${E2E_REGISTRY_PORT}:5000" "$E2E_REGISTRY_IMAGE" >/dev/null
+for _ in $(seq 1 30); do
+  curl -fsS "http://127.0.0.1:$E2E_REGISTRY_PORT/v2/" >/dev/null 2>&1 && break
+  sleep 1
+done
+curl -fsS "http://127.0.0.1:$E2E_REGISTRY_PORT/v2/" >/dev/null
+
 if [ "$E2E_MODE" = "dind" ]; then
   echo ">> swarm ready: export DOCKER_HOST=tcp://127.0.0.1:${E2E_DIND_PORT}"
 else

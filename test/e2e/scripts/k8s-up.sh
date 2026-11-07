@@ -7,6 +7,7 @@
 #     never needs registry access;
 #   - stock Flux2 (`flux install`), External Secrets Operator (helm chart) and
 #     the Gateway API CRDs (standard channel) and the Traefik CRDs;
+#   - the OCI registry from up.sh joined to the `kind` network;
 #   - a smart-HTTP git server container (fetch and push, no auth) on the
 #     `kind` network,
 #     serving the bare repos in $E2E_GIT_ROOT at
@@ -232,5 +233,12 @@ if ! kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded pod/git-
   exit 1
 fi
 kubectl -n default delete pod git-probe >/dev/null
+
+# OCI registry (started by up.sh): join it to the kind network so Flux's
+# source-controller can pull from http://$E2E_REGISTRY_NAME:5000.
+if docker inspect "$E2E_REGISTRY_NAME" >/dev/null 2>&1; then
+  echo ">> connecting $E2E_REGISTRY_NAME to the kind network"
+  docker network connect kind "$E2E_REGISTRY_NAME" 2>/dev/null || true
+fi
 
 echo ">> kind cluster ready: export KUBECONFIG=$E2E_KUBECONFIG PATH=$E2E_BIN_DIR:\$PATH"

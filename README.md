@@ -3,7 +3,8 @@
 GitOps for Docker Swarm that reads the same Git repository as
 [Flux v2](https://github.com/fluxcd/flux2) on Kubernetes.
 
-The repository holds genuine Flux objects (`GitRepository`, `Kustomization`)
+The repository holds genuine Flux objects (`GitRepository`, `OCIRepository`,
+`Kustomization`)
 and plain Kubernetes manifests (`Deployment`, `Service`, `ConfigMap`,
 `PersistentVolumeClaim`, External Secrets Operator `ExternalSecret`, Gateway
 API `HTTPRoute`). Stock Flux applies them to a Kubernetes cluster;
@@ -145,6 +146,19 @@ flux4swarm controller --url https://github.com/acme/fleet --branch main --path .
 flux4swarm reconcile --path ./clusters/prod --dry-run      # local directory
 flux4swarm reconcile --url https://dev.azure.com/acme/platform/_git/fleet --path ./clusters/prod --wait
 ```
+
+Sources can be a `GitRepository` (branch, tag, commit or `ref.semver`, e.g.
+`--semver '>=1.0.0 <2.0.0'`) or an `OCIRepository` with artifacts pushed by
+`flux push artifact`:
+
+```sh
+flux push artifact oci://ghcr.io/acme/fleet:1.4.0 --path ./clusters/prod \
+  --source "$(git config --get remote.origin.url)" --revision "1.4.0@sha1:$(git rev-parse HEAD)"
+flux4swarm controller --url oci://ghcr.io/acme/fleet --semver '1.x'
+```
+
+or the same objects in a `--config` file (`kind: OCIRepository`,
+`spec.ref.semver`, `spec.secretRef` with a `.dockerconfigjson`).
 
 As a Swarm service see [deploy/flux4swarm-stack.yaml](deploy/flux4swarm-stack.yaml).
 Credentials (the `secretRef` of a GitRepository or SecretStore) are files in

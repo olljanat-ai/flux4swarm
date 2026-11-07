@@ -28,6 +28,7 @@ type TraefikMiddleware struct {
 type Set struct {
 	// Flux objects.
 	GitRepositories []*GitRepository
+	OCIRepositories []*OCIRepository
 	Kustomizations  []*Kustomization
 
 	// Flux notification objects.
@@ -145,6 +146,13 @@ func (s *Set) decodeOne(doc []byte, defNS string) error {
 		}
 		o.Metadata.Namespace = ns
 		s.GitRepositories = append(s.GitRepositories, o)
+	case group == "source.toolkit.fluxcd.io" && h.Kind == KindOCIRepository:
+		o := &OCIRepository{}
+		if err := dec(o); err != nil {
+			return err
+		}
+		o.Metadata.Namespace = ns
+		s.OCIRepositories = append(s.OCIRepositories, o)
 	case group == "kustomize.toolkit.fluxcd.io" && h.Kind == KindKustomization:
 		o := &Kustomization{}
 		if err := dec(o); err != nil {

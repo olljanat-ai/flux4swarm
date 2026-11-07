@@ -5,7 +5,8 @@
 #   make e2e-test
 # Variables: E2E_MODE=dind|host, E2E_K8S=0 (skip the K8s side), E2E_KEEP=1,
 #            FLUX4SWARM_BIN=path, E2E_RUN=regex, E2E_DIND_PORT (default 23750),
-#            E2E_GIT_PORT (default 23780), E2E_GO_TEST_FLAGS.
+#            E2E_GIT_PORT (default 23780), E2E_REGISTRY_PORT (default 23781),
+#            E2E_GO_TEST_FLAGS.
 # Tool and component versions are pinned in scripts/env.sh.
 
 E2E_DIR        := $(patsubst %/,%,$(dir $(lastword $(MAKEFILE_LIST))))
@@ -14,13 +15,14 @@ E2E_MODE       ?= dind
 E2E_K8S        ?= 1
 E2E_DIND_PORT  ?= 23750
 E2E_GIT_PORT   ?= 23780
+E2E_REGISTRY_PORT ?= 23781
 E2E_KEEP       ?=
 E2E_RUN        ?=
 E2E_GO_TEST_FLAGS ?= -v -count=1 -timeout 40m
 FLUX4SWARM_BIN ?= $(E2E_ROOT)/bin/flux4swarm
 E2E_BIN_DIR    ?= $(abspath $(E2E_DIR))/.bin
 
-export E2E_MODE E2E_K8S E2E_DIND_PORT E2E_GIT_PORT FLUX4SWARM_BIN E2E_BIN_DIR
+export E2E_MODE E2E_K8S E2E_DIND_PORT E2E_GIT_PORT E2E_REGISTRY_PORT FLUX4SWARM_BIN E2E_BIN_DIR
 
 ifeq ($(E2E_MODE),dind)
 E2E_DOCKER_HOST := tcp://127.0.0.1:$(E2E_DIND_PORT)

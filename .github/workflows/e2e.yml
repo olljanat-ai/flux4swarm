@@ -25,6 +25,7 @@ jobs:
       E2E_K8S: "1"
       E2E_DIND_PORT: "23750"
       E2E_GIT_PORT: "23780"
+      E2E_REGISTRY_PORT: "23781"
     steps:
       - uses: actions/checkout@v7
 
@@ -73,7 +74,7 @@ jobs:
           export PATH="$PWD/test/e2e/.bin:$PATH"
           echo "::group::flux get all -A"; flux get all -A; echo "::endgroup::"
           echo "::group::kubectl get all -A"; kubectl get all -A -o wide; echo "::endgroup::"
-          echo "::group::flux custom resources"; kubectl get gitrepositories,kustomizations -A -o yaml; echo "::endgroup::"
+          echo "::group::flux custom resources"; kubectl get gitrepositories,ocirepositories,kustomizations -A -o yaml; echo "::endgroup::"
           echo "::group::ESO / Gateway API objects"; kubectl get externalsecrets,secretstores,httproutes,gateways -A; echo "::endgroup::"
           echo "::group::events"; kubectl get events -A --sort-by=.lastTimestamp | tail -200; echo "::endgroup::"
           for c in source-controller kustomize-controller; do
@@ -82,6 +83,7 @@ jobs:
           echo "::group::flux logs (all controllers)"; flux logs --all-namespaces --tail 300; echo "::endgroup::"
           echo "::group::external-secrets logs"; kubectl -n external-secrets logs deploy/external-secrets --tail 300; echo "::endgroup::"
           echo "::group::git server logs"; docker logs --tail 300 flux4swarm-e2e-git; echo "::endgroup::"
+          echo "::group::registry logs"; docker logs --tail 300 flux4swarm-e2e-registry; echo "::endgroup::"
 
       - name: Tear down
         if: always()

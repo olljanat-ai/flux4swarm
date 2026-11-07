@@ -3,6 +3,7 @@
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 
+docker rm -f -v "$E2E_REGISTRY_NAME" >/dev/null 2>&1 && echo ">> removed $E2E_REGISTRY_NAME" || true
 if [ "$E2E_MODE" = "dind" ]; then
   docker rm -f -v "$E2E_DIND_NAME" >/dev/null 2>&1 && echo ">> removed $E2E_DIND_NAME" || true
 else

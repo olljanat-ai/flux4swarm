@@ -3,6 +3,7 @@ module github.com/olljanat-ai/flux4swarm
 go 1.27.0
 
 require (
+	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/drone/envsubst v1.0.3
 	github.com/evanphx/json-patch/v5 v5.9.11
