@@ -1,0 +1,57 @@
+name: e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Keep the DinD swarm after the run so failure diagnostics can read it;
+      # the last step tears it down.
+      E2E_KEEP: "1"
+      E2E_DIND_PORT: "23750"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Uses the controller's go.mod once it exists, else the e2e module's.
+          go-version-file: ${{ hashFiles('go.mod') != '' && 'go.mod' || 'test/e2e/go.mod' }}
+          # The e2e module has no dependencies (and no go.sum) yet.
+          cache: false
+
+      - name: Vet e2e tests
+        working-directory: test/e2e
+        run: go vet -tags e2e ./...
+
+      - name: Run e2e
+        run: make e2e
+
+      - name: Diagnostics
+        if: failure()
+        env:
+          DOCKER_HOST: tcp://127.0.0.1:23750
+        run: |
+          set +e
+          echo "::group::dind logs"; DOCKER_HOST= docker logs --tail 300 flux4swarm-e2e-dind; echo "::endgroup::"
+          echo "::group::docker info"; docker info; echo "::endgroup::"
+          echo "::group::services"; docker service ls
+          for s in $(docker service ls -q); do docker service ps --no-trunc "$s"; done
+          echo "::endgroup::"
+          echo "::group::configs/secrets"; docker config ls; docker secret ls; echo "::endgroup::"
+
+      - name: Tear down
+        if: always()
+        run: make e2e-down
