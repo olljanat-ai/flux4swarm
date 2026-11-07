@@ -26,6 +26,7 @@ complete mapping.
 | Mode | Command | Use it to |
 |------|---------|-----------|
 | **Import** | `flux4swarm import` | Export services, configs, secrets (as ExternalSecrets), volumes and Traefik routes (as Gateway API HTTPRoutes) from a running Swarm to a directory or straight to a GitHub / Azure DevOps repository. |
+| **Merge** | `flux4swarm merge` | Combine the imports of several Swarms (development, acceptance, production) into a shared Kustomize base plus a small overlay per environment that only patches what differs. |
 | **Continuous import** | `flux4swarm import --watch` | Keep the Swarm as the source of truth (teams keep using `docker stack deploy`) and commit every change to Git, so Flux keeps a Kubernetes cluster in sync while the platform team adds Kubernetes-only features on top. |
 | **GitOps** | `flux4swarm controller` (loop) / `flux4swarm reconcile` (one pass) | Pull the repository, build it like Flux's kustomize-controller, apply it to Swarm, prune what was removed and wait for services to converge. |
 
@@ -139,6 +140,22 @@ flux4swarm import --watch --cluster prod --bootstrap --git-url https://github.co
 
 To run it as a Swarm service see
 [deploy/flux4swarm-export-stack.yaml](deploy/flux4swarm-export-stack.yaml).
+
+### Several Swarms: shared base and per-environment overlays
+
+Import each Swarm into its own cluster directory, then let `merge` move
+what they share into `apps/base` and rewrite each `clusters/<env>/apps` as
+an overlay with only that environment's objects and patches (image tags,
+replicas, env vars, config data, Traefik hosts, ...):
+
+```sh
+DOCKER_HOST=ssh://dev-manager  flux4swarm import --cluster development --bootstrap --output fleet
+DOCKER_HOST=ssh://prod-manager flux4swarm import --cluster production  --bootstrap --output fleet
+flux4swarm merge --env development --env production --output fleet
+```
+
+Every overlay is checked to build back to exactly its import. See
+[docs/kubernetes-and-swarm.md](docs/kubernetes-and-swarm.md#several-environments-one-shared-base).
 
 ### Services outside a stack
 
