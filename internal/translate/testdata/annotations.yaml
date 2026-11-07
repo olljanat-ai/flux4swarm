@@ -1,0 +1,30 @@
+# flux4swarm annotations: service name override, network list, a
+# service-spec merge patch, and imagePullSecrets.
+apiVersion: v1
+kind: Secret
+metadata: {name: regcred, namespace: apps}
+type: kubernetes.io/dockerconfigjson
+stringData:
+  .dockerconfigjson: '{"auths":{"https://registry.example.com/":{"auth":"dXNlcjpwYXNz"},"https://index.docker.io/v1/":{"username":"hub","password":"hubpass"}}}'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: apps
+  annotations:
+    swarm.flux4swarm.io/name: legacy_worker
+    swarm.flux4swarm.io/networks: "backend, apps_default,"
+    swarm.flux4swarm.io/service-spec: |
+      Labels:
+        extra: "yes"
+      TaskTemplate:
+        Placement:
+          MaxReplicas: 1
+spec:
+  selector: {matchLabels: {app: worker}}
+  template:
+    metadata: {labels: {app: worker}}
+    spec:
+      imagePullSecrets: [{name: regcred}, {name: missing}]
+      containers: [{name: worker, image: registry.example.com/worker:3}]

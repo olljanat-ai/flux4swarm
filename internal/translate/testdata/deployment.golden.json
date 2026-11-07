@@ -1,0 +1,137 @@
+{
+  "warnings": [
+    "env IP: fieldRef status.podIP is not supported on Swarm"
+  ],
+  "networks": [
+    {
+      "name": "default_default",
+      "labels": {
+        "com.docker.stack.namespace": "default"
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "web",
+      "spec": {
+        "Name": "web",
+        "Labels": {
+          "app": "web",
+          "tier": "frontend"
+        },
+        "TaskTemplate": {
+          "ContainerSpec": {
+            "Image": "nginx:1.27",
+            "Command": [
+              "nginx"
+            ],
+            "Args": [
+              "-g",
+              "daemon off;"
+            ],
+            "Env": [
+              "MODE=production",
+              "POD={{.Task.Name}}",
+              "NODE={{.Node.Hostname}}",
+              "NS=default"
+            ],
+            "Dir": "/srv",
+            "User": "101:2000",
+            "ReadOnly": true,
+            "StopGracePeriod": 45000000000,
+            "Healthcheck": {
+              "Test": [
+                "CMD",
+                "curl",
+                "-f",
+                "http://localhost:8080/"
+              ],
+              "Interval": 10000000000,
+              "Timeout": 2000000000,
+              "StartPeriod": 5000000000,
+              "Retries": 3
+            },
+            "Hosts": [
+              "10.1.2.3 db.local",
+              "10.1.2.3 db"
+            ],
+            "DNSConfig": {
+              "Nameservers": [
+                "10.0.0.10"
+              ],
+              "Search": [
+                "svc.local"
+              ],
+              "Options": [
+                "ndots:2",
+                "edns0"
+              ]
+            },
+            "CapabilityAdd": [
+              "CAP_NET_BIND_SERVICE"
+            ],
+            "CapabilityDrop": [
+              "ALL"
+            ]
+          },
+          "Resources": {
+            "Limits": {
+              "NanoCPUs": 500000000,
+              "MemoryBytes": 268435456
+            },
+            "Reservations": {
+              "NanoCPUs": 100000000,
+              "MemoryBytes": 67108864
+            }
+          },
+          "Placement": {
+            "Constraints": [
+              "node.labels.disk==ssd",
+              "node.platform.arch==aarch64",
+              "node.platform.os==linux",
+              "node.role==manager"
+            ]
+          },
+          "Networks": [
+            {
+              "Target": "default_default",
+              "Aliases": [
+                "web"
+              ]
+            }
+          ],
+          "ForceUpdate": 0
+        },
+        "Mode": {
+          "Replicated": {
+            "Replicas": 3
+          }
+        },
+        "UpdateConfig": {
+          "Parallelism": 1,
+          "MaxFailureRatio": 0,
+          "Order": "start-first"
+        },
+        "EndpointSpec": {
+          "Mode": "vip",
+          "Ports": [
+            {
+              "Name": "http",
+              "Protocol": "tcp",
+              "TargetPort": 8080,
+              "PublishedPort": 80,
+              "PublishMode": "ingress"
+            },
+            {
+              "Name": "metrics",
+              "Protocol": "udp",
+              "TargetPort": 9090,
+              "PublishedPort": 9090,
+              "PublishMode": "ingress"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+# A StatefulSet with volumeClaimTemplates behind a headless Service, and a
+# NodePort Service with externalTrafficPolicy Local.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: db, namespace: data}
+spec:
+  replicas: 2
+  serviceName: db
+  selector: {matchLabels: {app: db}}
+  template:
+    metadata: {labels: {app: db}}
+    spec:
+      initContainers:
+        - {name: init, image: busybox}
+      containers:
+        - name: postgres
+          image: postgres:17
+          ports: [{name: pg, containerPort: 5432}]
+          volumeMounts:
+            - {name: pgdata, mountPath: /var/lib/postgresql/data}
+  volumeClaimTemplates:
+    - metadata: {name: pgdata}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 1Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: db, namespace: data}
+spec:
+  clusterIP: None
+  selector: {app: db}
+  ports: [{port: 5432}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: db-external, namespace: data}
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  selector: {app: db}
+  ports: [{port: 5432, targetPort: pg, nodePort: 30432}]

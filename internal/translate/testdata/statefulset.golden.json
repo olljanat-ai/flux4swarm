@@ -1,0 +1,70 @@
+{
+  "warnings": [
+    "StatefulSet data/db: init containers are not supported on Swarm and were ignored"
+  ],
+  "networks": [
+    {
+      "name": "data_default",
+      "labels": {
+        "com.docker.stack.namespace": "data"
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "data_db",
+      "spec": {
+        "Name": "data_db",
+        "Labels": {
+          "com.docker.stack.namespace": "data"
+        },
+        "TaskTemplate": {
+          "ContainerSpec": {
+            "Image": "postgres:17",
+            "Labels": {
+              "com.docker.stack.namespace": "data"
+            },
+            "Mounts": [
+              {
+                "Type": "volume",
+                "Source": "data_pgdata-db-{{.Task.Slot}}",
+                "Target": "/var/lib/postgresql/data",
+                "VolumeOptions": {
+                  "Labels": {
+                    "com.docker.stack.namespace": "data"
+                  }
+                }
+              }
+            ]
+          },
+          "Networks": [
+            {
+              "Target": "data_default",
+              "Aliases": [
+                "db",
+                "db-external"
+              ]
+            }
+          ],
+          "ForceUpdate": 0
+        },
+        "Mode": {
+          "Replicated": {
+            "Replicas": 2
+          }
+        },
+        "EndpointSpec": {
+          "Mode": "dnsrr",
+          "Ports": [
+            {
+              "Protocol": "tcp",
+              "TargetPort": 5432,
+              "PublishedPort": 30432,
+              "PublishMode": "host"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

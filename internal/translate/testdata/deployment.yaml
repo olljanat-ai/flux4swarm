@@ -1,0 +1,85 @@
+# A Deployment in the default namespace with a LoadBalancer Service:
+# replicas, rolling update, env, resources, placement, probes, security
+# context, DNS and host aliases.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: default
+  labels: {app: web, tier: frontend}
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  selector: {matchLabels: {app: web}}
+  template:
+    metadata: {labels: {app: web}}
+    spec:
+      terminationGracePeriodSeconds: 45
+      nodeSelector:
+        kubernetes.io/os: linux
+        kubernetes.io/arch: arm64
+        node-role.kubernetes.io/control-plane: ""
+        disk: ssd
+      securityContext: {runAsUser: 1000, runAsGroup: 2000}
+      dnsConfig:
+        nameservers: [10.0.0.10]
+        searches: [svc.local]
+        options:
+          - {name: ndots, value: "2"}
+          - {name: edns0}
+      hostAliases:
+        - ip: 10.1.2.3
+          hostnames: [db.local, db]
+      containers:
+        - name: web
+          image: nginx:1.27
+          command: [nginx]
+          args: [-g, daemon off;]
+          workingDir: /srv
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - {name: MODE, value: production}
+            - name: POD
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: NODE
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - name: NS
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            - name: IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+          resources:
+            limits: {cpu: 500m, memory: 256Mi}
+            requests: {cpu: 100m, memory: 64Mi}
+          livenessProbe:
+            exec: {command: [curl, -f, http://localhost:8080/]}
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+            initialDelaySeconds: 5
+          securityContext:
+            runAsUser: 101
+            readOnlyRootFilesystem: true
+            capabilities:
+              add: [NET_BIND_SERVICE]
+              drop: [all]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: web, namespace: default}
+spec:
+  type: LoadBalancer
+  selector: {app: web}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+    - {name: metrics, port: 9090, protocol: UDP}
+---
+# Selects nothing: no aliases or ports on any service.
+apiVersion: v1
+kind: Service
+metadata: {name: other, namespace: default}
+spec:
+  selector: {app: other}
+  ports: [{port: 80}]
