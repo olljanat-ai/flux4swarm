@@ -170,6 +170,17 @@ directories, so plain additions in `platform/` (with its own
 If you prefer, the same `patches` can go into the `spec.patches` of the
 Flux `Kustomization` in `flux-system/gotk-sync.yaml` instead.
 
+Before every commit `import` (and `import --watch`) runs the same kustomize
+build Flux would: of `clusters/<cluster>` and of every Flux `Kustomization`
+in it that reads the `flux-system` GitRepository, with its `patches`,
+`images`, `targetNamespace` and so on. When a build fails, for example
+because a patch without a `target` names a service that was renamed or
+removed on Swarm, nothing is committed or pushed: one-shot `import` exits
+with the error, and `--watch` logs `export not pushed: kustomize build
+failed` with the failing path and keeps retrying until the overlay is
+fixed. Git then keeps the last export that Flux could apply. `--validate=false`
+turns the check off.
+
 ### Moving a workload over
 
 Start from `MIGRATION.md`: a service with no blockers can move as it is;

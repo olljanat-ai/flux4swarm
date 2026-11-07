@@ -1050,10 +1050,13 @@ func (e *exporter) write() error {
 	rootRes := append([]string(nil), dirs[appsRoot]...)
 	sort.Strings(rootRes)
 	rootRes = append(rootRes, appDirs...)
-	if len(rootRes) > 0 {
-		if err := e.render(appsRoot+"/kustomization.yaml", kustomization(rootRes)); err != nil {
-			return err
-		}
+	// Always written, even for an empty Swarm: overlays outside apps/
+	// list it as a resource and must keep building.
+	if rootRes == nil {
+		rootRes = []string{}
+	}
+	if err := e.render(appsRoot+"/kustomization.yaml", kustomization(rootRes)); err != nil {
+		return err
 	}
 	for f, objs := range e.files {
 		if err := e.render(f, objs...); err != nil {

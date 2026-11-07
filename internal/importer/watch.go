@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -167,7 +168,13 @@ func Watch(ctx context.Context, es EventSource, o WatchOptions, sync func(ctx co
 			}
 			if err != nil {
 				backoff = min(max(2*backoff, 2*time.Second), o.Interval)
-				o.Log.Error("export failed", "error", err, "retry", backoff)
+				var ve *ValidationError
+				if errors.As(err, &ve) {
+					o.Log.Error("export not pushed: kustomize build failed; fix the overlay or patch that no longer matches Swarm",
+						"path", ve.Path, "error", ve.Err, "retry", backoff)
+				} else {
+					o.Log.Error("export failed", "error", err, "retry", backoff)
+				}
 				full = true
 				run.Reset(backoff)
 				scheduled = true
