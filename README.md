@@ -157,6 +157,10 @@ anywhere else, such as `flux-system/` or the platform team's overlays and
 patches, are created once when missing and then left alone. That is how
 Kubernetes-only features are added on top, see
 [docs/kubernetes-and-swarm.md](docs/kubernetes-and-swarm.md#keep-kubernetes-in-sync-with-a-live-swarm).
+Before each commit the tree is kustomize-built like Flux does, including
+those overlays; if an overlay no longer matches Swarm (a patched service was
+renamed or removed) the export is not pushed and the failure is logged, so
+Flux keeps the last export that worked.
 
 Each commit message says what changed, grouped by namespace, so the Git
 history reads as an audit log of the Swarm, for example

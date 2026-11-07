@@ -548,6 +548,7 @@ func newImportCmd() *cobra.Command {
 
 		adoptOwner     string
 		watch          bool
+		validate       bool
 		interval       time.Duration
 		debounce       time.Duration
 		listen         string
@@ -579,6 +580,7 @@ func newImportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&email, "author-email", "flux4swarm@users.noreply.github.com", "commit author email")
 	cmd.Flags().StringVar(&credsDir, "credentials-dir", creds.DefaultDir, "directory with the --git-secret credentials")
 	cmd.Flags().BoolVar(&watch, "watch", false, "keep running: export again after every Swarm service, config or secret change and every --interval, and commit only when the export differs (Swarm stays the source of truth)")
+	cmd.Flags().BoolVar(&validate, "validate", true, "run a Flux-compatible kustomize build of <path> and the Flux Kustomizations in it before committing, and refuse to push when it fails (for example when an overlay patches a service that is gone from Swarm)")
 	cmd.Flags().DurationVar(&interval, "interval", 10*time.Minute, "with --watch: full resync period")
 	cmd.Flags().DurationVar(&debounce, "debounce", 5*time.Second, "with --watch: wait this long after a Swarm change before exporting, so one stack deploy gives one commit")
 	cmd.Flags().StringVar(&listen, "listen", ":9797", "with --watch: address for /healthz, /readyz, /status and /metrics; empty disables them")
@@ -624,6 +626,11 @@ func newImportCmd() *cobra.Command {
 				if err := res.WriteTo(output, watch); err != nil {
 					return nil, err
 				}
+				if validate {
+					if err := importer.Validate(output, res.Root); err != nil {
+						return nil, err
+					}
+				}
 				fmt.Printf("wrote %d files to %s\n", len(res.Files), filepath.Join(output, res.Root))
 				return res, nil
 			}
@@ -644,8 +651,16 @@ func newImportCmd() *cobra.Command {
 			defer os.RemoveAll(work)
 			pr, err := git.CommitAndPush(ctx, filepath.Join(work, "repo"), git.PushOptions{
 				URL: gf.url, Branch: gf.branch, Message: msg, Describe: describe, Author: author, Email: email,
-				Auth:  &git.AuthProvider{Provider: gf.provider, URL: gf.url, Secret: secret},
-				Write: func(root string) error { return res.WriteTo(root, watch) },
+				Auth: &git.AuthProvider{Provider: gf.provider, URL: gf.url, Secret: secret},
+				Write: func(root string) error {
+					if err := res.WriteTo(root, watch); err != nil {
+						return err
+					}
+					if validate {
+						return importer.Validate(root, res.Root)
+					}
+					return nil
+				},
 			})
 			if err != nil {
 				return nil, err
