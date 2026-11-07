@@ -230,7 +230,27 @@ type PushResult struct {
 
 // CommitAndPush clones the branch (or starts it if the repository or branch
 // is empty), lets Write change files, commits everything and pushes.
+//
+// The clone is shallow (depth 1), so the cost of a sync does not grow with
+// the history of the export repository. If the shallow attempt fails for
+// any reason (a server or transport that cannot serve or accept it), the
+// whole sync is retried once with a full clone.
 func CommitAndPush(ctx context.Context, workDir string, o PushOptions) (*PushResult, error) {
+	res, err := commitAndPush(ctx, workDir, o, 1)
+	if err == nil || ctx.Err() != nil {
+		return res, err
+	}
+	if rerr := os.RemoveAll(workDir); rerr != nil {
+		return nil, err
+	}
+	res, ferr := commitAndPush(ctx, workDir, o, 0)
+	if ferr != nil && ferr.Error() != err.Error() {
+		ferr = fmt.Errorf("%w (shallow attempt: %v)", ferr, err)
+	}
+	return res, ferr
+}
+
+func commitAndPush(ctx context.Context, workDir string, o PushOptions, depth int) (*PushResult, error) {
 	auth, err := o.Auth.Method(ctx)
 	if err != nil {
 		return nil, err
@@ -241,6 +261,7 @@ func CommitAndPush(ctx context.Context, workDir string, o PushOptions) (*PushRes
 	branch := plumbing.NewBranchReferenceName(o.Branch)
 	repo, err := gogit.PlainCloneContext(ctx, workDir, false, &gogit.CloneOptions{
 		URL: o.URL, Auth: auth, ReferenceName: branch, SingleBranch: true,
+		Depth: depth, Tags: gogit.NoTags,
 	})
 	switch {
 	case err == nil:
