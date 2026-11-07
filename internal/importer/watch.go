@@ -51,10 +51,11 @@ func (r *Result) WriteTo(root string, keep bool) error {
 	return nil
 }
 
-// owned reports whether file is in one of the Clean directories.
+// owned reports whether file is one of the Clean paths or in one of the
+// Clean directories.
 func (r *Result) owned(file string) bool {
 	for _, c := range r.Clean {
-		if strings.HasPrefix(file, strings.TrimSuffix(c, "/")+"/") {
+		if file == c || strings.HasPrefix(file, strings.TrimSuffix(c, "/")+"/") {
 			return true
 		}
 	}

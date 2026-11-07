@@ -101,6 +101,9 @@ type Result struct {
 	Skipped []Skipped
 	// Desired is the Swarm state the export renders to, for AdoptLabels.
 	Desired *swarmapply.Desired
+	// Report is the Kubernetes migration readiness report, also written
+	// to <root>/MIGRATION.md.
+	Report *Report
 }
 
 // Skipped is a Swarm object that was not exported.
@@ -189,6 +192,7 @@ type exporter struct {
 	extSecrets                  map[string]*api.ExternalSecret // ns/name
 	placeholders                []*corev1.Secret
 	pvcs                        map[string]*corev1.PersistentVolumeClaim
+	services                    []reportService
 	entryPoints, tlsEntryPoints []string
 }
 
@@ -322,7 +326,11 @@ func (e *exporter) run(ctx context.Context, c Client) error {
 	if err := e.roundTrip(); err != nil {
 		return err
 	}
-	return e.write()
+	if err := e.write(); err != nil {
+		return err
+	}
+	e.report()
+	return nil
 }
 
 // service converts one Swarm service.
@@ -593,6 +601,7 @@ func (e *exporter) service(s swarm.Service, netNames map[string]string, configs 
 	}
 	e.add(file, obj)
 	e.addToSet(obj)
+	e.services = append(e.services, reportService{swarm: spec.Name, kind: kindOf(obj), ns: ns, name: name})
 	e.original[spec.Name] = spec
 	e.workload[spec.Name] = objectMeta(obj)
 	e.podSpecs[spec.Name] = podSpecOf(obj)
@@ -683,6 +692,16 @@ func (e *exporter) addToSet(obj any) {
 	case *batchv1.Job:
 		e.set.Jobs = append(e.set.Jobs, o)
 	}
+}
+
+func kindOf(obj any) string {
+	switch obj.(type) {
+	case *appsv1.DaemonSet:
+		return "DaemonSet"
+	case *batchv1.Job:
+		return "Job"
+	}
+	return "Deployment"
 }
 
 func objectMeta(obj any) *metav1.ObjectMeta {

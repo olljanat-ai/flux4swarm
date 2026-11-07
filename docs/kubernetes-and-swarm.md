@@ -122,6 +122,7 @@ then both Git and Swarm would claim to be the source of truth.
 clusters/prod/
   flux-system/            # created once by --bootstrap, then yours (flux bootstrap may rewrite it)
   apps/                   # owned by import --watch: regenerated on every Swarm change, do not edit
+  MIGRATION.md            # owned by import --watch: what still blocks each service on Kubernetes
   platform/               # owned by the platform team: Kubernetes-only objects
   kustomization.yaml      # owned by the platform team: ties it together and patches apps/
 ```
@@ -171,6 +172,9 @@ Flux `Kustomization` in `flux-system/gotk-sync.yaml` instead.
 
 ### Moving a workload over
 
+Start from `MIGRATION.md`: a service with no blockers can move as it is;
+the others list what to change on Swarm first (see
+[the README](../README.md#migration-readiness-report)).
 When a workload should run only on Kubernetes, copy its manifests from
 `apps/` into `platform/` (or another directory you own) and remove the
 service from Swarm, or keep it on Swarm and `--exclude` it from the export.

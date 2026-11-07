@@ -66,6 +66,9 @@ func assertImportedTree(t *testing.T, repo *gitRepo, ns string) {
 	if !anyFileContains(repo, appDir(ns)+"/externalsecret-*.yaml", "kind: ExternalSecret", "external-secrets.io/v1") {
 		t.Errorf("no %s/externalsecret-*.yaml with an external-secrets.io/v1 ExternalSecret; tree:\n%s", appDir(ns), repo.git("ls-files"))
 	}
+	if report := repo.mustRead(clusterPath + "/MIGRATION.md"); !strings.Contains(report, "| Deployment "+ns+"/web | `"+ns+"_web` |") {
+		t.Errorf("MIGRATION.md does not list %s/web:\n%s", ns, report)
+	}
 	// Swarm never reveals secret data, and plaintext must not end up in Git.
 	if out, _ := run(t, time.Minute, repo.Work, "git", "grep", "-l", fixtureSecret); out != "" {
 		t.Errorf("secret value found in Git: %s", out)
