@@ -57,7 +57,7 @@ docker build -t flux4swarm .
 ```
 
 `flux4swarm version` prints the version, commit and build date.
-To cut a release, push a `vX.Y.Z` tag; the release workflow runs GoReleaser.
+To cut a release, push a `vX.Y.Z` tag, or run the **release** workflow from the Actions tab with the version (e.g. `0.1.0`); it tags the head of the selected branch and runs GoReleaser.
 
 flux4swarm talks to the Docker Engine API of a Swarm **manager** and honours
 `DOCKER_HOST`, `DOCKER_TLS_VERIFY` and `DOCKER_CERT_PATH`.
