@@ -94,6 +94,8 @@ type WatchOptions struct {
 	// exporting, so a `docker stack deploy` gives one commit.
 	Debounce time.Duration
 	Log      *slog.Logger
+	// Status, when set, records the result of every export.
+	Status *WatchStatus
 }
 
 // Watch runs sync once at start, after Swarm service, config and secret
@@ -155,10 +157,14 @@ func Watch(ctx context.Context, es EventSource, o WatchOptions, sync func(ctx co
 			scheduled = true
 		case <-run.C:
 			scheduled = false
-			if err := sync(ctx, full); err != nil {
-				if ctx.Err() != nil {
-					return nil
-				}
+			err := sync(ctx, full)
+			if ctx.Err() != nil {
+				return nil
+			}
+			if o.Status != nil {
+				o.Status.Record(err)
+			}
+			if err != nil {
 				backoff = min(max(2*backoff, 2*time.Second), o.Interval)
 				o.Log.Error("export failed", "error", err, "retry", backoff)
 				full = true

@@ -1,11 +1,16 @@
-# Prometheus and Grafana with the Flux GitOps dashboard, for a Swarm where
-# deploy/flux4swarm-stack.yaml runs as stack flux-system:
+# Prometheus and Grafana with the Flux GitOps dashboard and the example
+# alerts, for a Swarm where deploy/flux4swarm-stack.yaml runs as stack
+# flux-system:
 #   docker config create prometheus.yml deploy/monitoring/prometheus.yml
+#   docker config create prometheus-alerts deploy/monitoring/alerts.yml
 #   docker config create grafana-datasource deploy/monitoring/grafana/provisioning/datasources/prometheus.yaml
 #   docker config create grafana-dashboards deploy/monitoring/grafana/provisioning/dashboards/flux.yaml
 #   docker config create grafana-flux-gitops deploy/monitoring/grafana/flux-gitops.json
 #   docker stack deploy -c deploy/monitoring/monitoring-stack.yaml monitoring
-# Grafana listens on :3000 (admin/admin on first login).
+# Grafana listens on :3000 (admin/admin on first login). Prometheus shows the
+# alerts at :9090/alerts inside the stack; add an Alertmanager to send them.
+# To also scrape `import --watch` (stack flux4swarm-export), uncomment the
+# flux4swarm-export network below.
 version: "3.8"
 services:
   prometheus:
@@ -13,9 +18,14 @@ services:
     configs:
       - source: prometheus.yml
         target: /etc/prometheus/prometheus.yml
+      - source: prometheus-alerts
+        target: /etc/prometheus/alerts.yml
     volumes:
       - prometheus:/prometheus
-    networks: [default, flux-system]
+    networks:
+      - default
+      - flux-system
+      # - flux4swarm-export
   grafana:
     image: grafana/grafana:12.2.0
     ports:
@@ -32,6 +42,8 @@ services:
 configs:
   prometheus.yml:
     external: true
+  prometheus-alerts:
+    external: true
   grafana-datasource:
     external: true
   grafana-dashboards:
@@ -42,6 +54,9 @@ networks:
   flux-system:
     external: true
     name: flux-system_default
+  # flux4swarm-export:
+  #   external: true
+  #   name: flux4swarm-export_default
 volumes:
   prometheus: {}
   grafana: {}

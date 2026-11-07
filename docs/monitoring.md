@@ -33,6 +33,36 @@ On Kubernetes, Prometheus renames the `namespace` label of controller metrics
 to `exported_namespace` because the scrape adds the pod's namespace. On Swarm
 the label stays `namespace`. The dashboard below handles both.
 
+## import --watch
+
+`flux4swarm import --watch` retries failed exports forever, so it runs
+unattended but would otherwise fail silently (an expired Git token, a
+rejected push, Docker API errors). It serves its own endpoints on `--listen`
+(default `:9797`, empty disables them):
+
+| Endpoint | |
+|----------|-|
+| `GET /healthz` | 200, or 503 with the reason and last error once no export succeeded for `--unhealthy-after` (default 3 x `--interval`, so 30m); before the first success the time since start counts |
+| `GET /readyz` | 503 until the first successful export |
+| `GET /status` | JSON: `healthy`, `lastAttempt`, `lastSuccess`, `lastCommit`, `lastCommitTime`, `lastError`, `consecutiveFailures` |
+| `GET /metrics` | the metrics below, plus `go_*` and `process_*` |
+
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `flux4swarm_watch_healthy` | gauge | | 1 when `/healthz` passes |
+| `flux4swarm_watch_syncs_total` | counter | `result` (`success`, `error`) | exports, including the cheap ones that find nothing changed |
+| `flux4swarm_watch_consecutive_failures` | gauge | | failed exports since the last success |
+| `flux4swarm_watch_commits_total` | counter | | commits pushed to Git |
+| `flux4swarm_watch_last_success_timestamp_seconds` | gauge | | Unix time of the last successful export (0 before it) |
+| `flux4swarm_watch_last_attempt_timestamp_seconds` | gauge | | Unix time of the last export |
+| `flux4swarm_watch_last_commit_timestamp_seconds` | gauge | | Unix time of the last push |
+| `flux4swarm_watch_last_commit_info` | gauge, always 1 | `commit` | the last commit pushed |
+| `flux4swarm_watch_unhealthy_after_seconds` | gauge | | the `--unhealthy-after` limit |
+
+The distroless image has no shell or curl for a Docker `HEALTHCHECK`, and a
+restart would not fix an expired token anyway, so alert on the metrics
+instead (see [Alerts](#alerts)).
+
 ## Grafana dashboard
 
 [deploy/monitoring/grafana/flux-gitops.json](../deploy/monitoring/grafana/flux-gitops.json)
@@ -59,17 +89,37 @@ docker config create grafana-flux-gitops deploy/monitoring/grafana/flux-gitops.j
 docker stack deploy -c deploy/monitoring/monitoring-stack.yaml monitoring
 ```
 
+Prometheus also loads the example [alerts](#alerts). To scrape
+`import --watch` of
+[deploy/flux4swarm-export-stack.yaml](../deploy/flux4swarm-export-stack.yaml)
+(stack `flux4swarm-export`) too, uncomment the `flux4swarm-export` network in
+the monitoring stack; the `flux4swarm-export` job finds it as `tasks.export`.
+
 To use an existing Prometheus instead, add a scrape job for port `9797` of the
-controller, for example with `dns_sd_configs` on `tasks.controller` as in
-[deploy/monitoring/prometheus.yml](../deploy/monitoring/prometheus.yml), and
-import the dashboard JSON in Grafana.
+controller (and of `import --watch`), for example with `dns_sd_configs` on
+`tasks.controller` as in
+[deploy/monitoring/prometheus.yml](../deploy/monitoring/prometheus.yml), load
+[deploy/monitoring/alerts.yml](../deploy/monitoring/alerts.yml) with
+`rule_files`, and import the dashboard JSON in Grafana.
 
 ## Alerts
 
-Flux's alerting examples work unchanged, for example:
+[deploy/monitoring/alerts.yml](../deploy/monitoring/alerts.yml) has example
+Prometheus rules. They expect the job names of
+[deploy/monitoring/prometheus.yml](../deploy/monitoring/prometheus.yml)
+(`flux4swarm` for the controller, `flux4swarm-export` for `import --watch`);
+send them on with your Alertmanager.
 
-```yaml
-- alert: FluxReconciliationFailure
-  expr: max by (customresource_kind, exported_namespace, name) (gotk_resource_info{ready="False"}) == 1
-  for: 10m
-```
+| Alert | Fires when | Severity |
+|-------|------------|----------|
+| `Flux4SwarmWatchUnhealthy` | `flux4swarm_watch_healthy == 0` for 5m: no successful export for `--unhealthy-after` | critical |
+| `Flux4SwarmWatchFailing` | 3 or more exports in a row failed, for 15m | warning |
+| `Flux4SwarmWatchDown` | the `import --watch` target is down for 10m | critical |
+| `FluxReconciliationFailure` | a GitRepository or Kustomization is not Ready for 10m (the Flux rule, works on Kubernetes too) | warning |
+| `FluxResourceStale` | an object that is not suspended was not reconciled for an hour | warning |
+| `FluxResourceSuspended` | an object has been suspended for a day | info |
+| `FluxControllerDown` | the controller target is down for 5m | critical |
+
+`FluxResourceStale` assumes intervals under an hour; widen its window if you
+use longer ones. `up == 0` does not fire when a service is removed
+altogether; add `absent(up{job="..."})` if that matters to you.

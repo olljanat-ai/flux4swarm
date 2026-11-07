@@ -1,0 +1,84 @@
+# Example Prometheus alert rules for flux4swarm. Load them with rule_files
+# (deploy/monitoring/monitoring-stack.yaml does) and route them with your
+# Alertmanager. The job names match deploy/monitoring/prometheus.yml:
+# flux4swarm for the controller, flux4swarm-export for `import --watch`.
+# Check after editing: promtool check rules alerts.yml
+groups:
+  # `flux4swarm import --watch` keeps exporting the Swarm to Git. It retries
+  # failed exports forever, so an expired Git token or a rejected push shows
+  # only here and in the logs.
+  - name: flux4swarm-watch
+    rules:
+      - alert: Flux4SwarmWatchUnhealthy
+        # The /healthz result: no successful export for --unhealthy-after
+        # (default 3 x --interval).
+        expr: flux4swarm_watch_healthy == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "flux4swarm import --watch has not exported the Swarm to Git for too long"
+          description: "{{ $labels.instance }}: no successful export within --unhealthy-after, so Git no longer follows the Swarm. GET /status shows the last error (expired Git token, rejected push, Docker API errors)."
+      - alert: Flux4SwarmWatchFailing
+        # Earlier warning: several exports in a row failed.
+        expr: flux4swarm_watch_consecutive_failures >= 3
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "flux4swarm import --watch exports keep failing"
+          description: "{{ $labels.instance }}: {{ $value }} exports in a row failed. GET /status shows the last error."
+      - alert: Flux4SwarmWatchDown
+        # To also notice the service being removed altogether, add
+        # absent(up{job="flux4swarm-export"}).
+        expr: up{job="flux4swarm-export"} == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "flux4swarm import --watch cannot be scraped"
+          description: "{{ $labels.instance }} has been down for 10 minutes."
+
+  # The controller (`flux4swarm controller`). The gotk_resource_info rules
+  # are the Flux ones and work for Flux on Kubernetes as well.
+  - name: flux4swarm-controller
+    rules:
+      - alert: FluxReconciliationFailure
+        expr: max by (customresource_kind, exported_namespace, name) (gotk_resource_info{ready="False"}) == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.customresource_kind }} {{ $labels.exported_namespace }}/{{ $labels.name }} is not Ready"
+          description: "Reconciliation has failed for 10 minutes. `flux4swarm get` or GET /status shows the reason."
+      - alert: FluxResourceStale
+        # Not reconciled for an hour although not suspended: the controller
+        # is stuck, or a fetch or apply hangs. Widen the window if you use
+        # intervals longer than an hour.
+        expr: |
+          sum by (kind, namespace, name) (increase(gotk_reconcile_duration_seconds_count{job="flux4swarm"}[1h])) == 0
+            unless on (kind, namespace, name) gotk_suspend_status{job="flux4swarm"} == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.kind }} {{ $labels.namespace }}/{{ $labels.name }} has not been reconciled for an hour"
+          description: "The object stopped reconciling although it is not suspended. Check the controller logs."
+      - alert: FluxResourceSuspended
+        # Suspending is meant to be temporary; a forgotten suspend silently
+        # stops GitOps for that object.
+        expr: max by (customresource_kind, exported_namespace, name) (gotk_resource_info{suspended="true"}) == 1
+        for: 24h
+        labels:
+          severity: info
+        annotations:
+          summary: "{{ $labels.customresource_kind }} {{ $labels.exported_namespace }}/{{ $labels.name }} has been suspended for a day"
+          description: "Resume it with `flux4swarm resume` when it should follow Git again."
+      - alert: FluxControllerDown
+        expr: up{job="flux4swarm"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The flux4swarm controller cannot be scraped"
+          description: "{{ $labels.instance }} has been down for 5 minutes; Swarm no longer follows Git."

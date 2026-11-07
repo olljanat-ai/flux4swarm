@@ -144,6 +144,12 @@ flux4swarm import --watch --cluster prod --bootstrap --git-url https://github.co
 
 To run it as a Swarm service see
 [deploy/flux4swarm-export-stack.yaml](deploy/flux4swarm-export-stack.yaml).
+A failed export is retried, so watch mode never exits on an expired token or
+a rejected push. It serves `/healthz`, `/status` and `/metrics` on
+`--listen` (default `:9797`); `/healthz` fails once no export succeeded for
+`--unhealthy-after` (default 3 x `--interval`). See
+[docs/monitoring.md](docs/monitoring.md#import---watch) for the metrics and
+alerts.
 
 ### Several Swarms: shared base and per-environment overlays
 
