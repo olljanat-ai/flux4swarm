@@ -6,11 +6,17 @@
 # The secret names follow the GitRepository secretRef: <secretRef>_<key>.
 # Port 9292 serves Flux Receiver webhooks (/hook/...); publish it to your Git
 # server and keep 9797 (status, POST /reconcile) internal.
+# FLUX4SWARM_DEFAULT_NAMESPACE is the Kubernetes namespace of services that
+# are not in a stack (e.g. made with `docker service create`). Use the same
+# value as with `flux4swarm import`; give each Swarm its own namespace when
+# they will share one Kubernetes cluster later.
 version: "3.8"
 services:
   controller:
     image: ghcr.io/olljanat-ai/flux4swarm:latest
     command: ["controller", "--config", "/etc/flux4swarm/gotk-sync.yaml", "--log-format", "json"]
+    environment:
+      FLUX4SWARM_DEFAULT_NAMESPACE: default
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - cache:/tmp/flux4swarm

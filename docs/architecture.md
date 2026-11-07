@@ -61,7 +61,8 @@ Swarm and apply to the Docker Engine API".
 4. `commonMetadata` is applied to every object, then `postBuild.substitute`
    (and `substituteFrom`) variables are replaced with drone/envsubst,
    honouring `kustomize.toolkit.fluxcd.io/substitute: disabled`.
-5. Objects are decoded. Objects without a namespace go to `default`.
+5. Objects are decoded. Objects without a namespace go to the
+   `--default-namespace` (`default` unless set).
    Objects labelled `app.kubernetes.io/part-of: flux` (gotk-components),
    annotated `swarm.flux4swarm.io/ignore: "true"` or
    `kustomize.toolkit.fluxcd.io/reconcile: disabled`, and kinds with no
@@ -78,7 +79,10 @@ setup. They are garbage collected when removed from Git if the parent has
 
 A Kubernetes namespace is a Docker stack, exactly like `docker stack
 deploy`: object `web` in namespace `shop` becomes `shop_web` with label
-`com.docker.stack.namespace=shop`; namespace `default` has no prefix. Every
+`com.docker.stack.namespace=shop`. The `--default-namespace` (env
+`FLUX4SWARM_DEFAULT_NAMESPACE`, `default` unless set) has no prefix or stack
+label; it is where import puts services that are not in a stack, so a
+dedicated Swarm can move into its own namespace of a shared cluster. Every
 workload joins the overlay network `<ns>_default` (created on demand) and
 gets the names of the Kubernetes Services that select it as network aliases,
 so in-cluster DNS names keep working.

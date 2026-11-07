@@ -923,7 +923,7 @@ func (e *exporter) write() error {
 	clusterStoreWritten := false
 	for _, ns := range nss {
 		dir := e.nsDir(ns)
-		if ns != translate.DefaultNamespace {
+		if ns != "default" {
 			e.add(dir+"/namespace.yaml", &corev1.Namespace{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
 				ObjectMeta: metav1.ObjectMeta{Name: ns}})
 		}
@@ -1214,14 +1214,14 @@ func splitNS(name string, labels map[string]string) (string, string) {
 	if ns := labels[api.LabelStackNamespace]; ns != "" {
 		return dnsName(ns), strings.TrimPrefix(name, ns+"_")
 	}
-	return translate.DefaultNamespace, name
+	return api.SwarmNamespace, name
 }
 
 func splitVolumeNS(source, ns string) (string, string) {
-	if ns != translate.DefaultNamespace && strings.HasPrefix(source, ns+"_") {
+	if ns != api.SwarmNamespace && strings.HasPrefix(source, ns+"_") {
 		return ns, strings.TrimPrefix(source, ns+"_")
 	}
-	return translate.DefaultNamespace, source
+	return api.SwarmNamespace, source
 }
 
 var dnsInvalid = regexp.MustCompile(`[^a-z0-9-]+`)

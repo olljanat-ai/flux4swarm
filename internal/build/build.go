@@ -44,7 +44,7 @@ func Build(root string, opts Options) (*api.Set, error) {
 		return nil, err
 	}
 	set := &api.Set{}
-	if err := set.Decode(opts.Spec.Path, out, "default"); err != nil {
+	if err := set.Decode(opts.Spec.Path, out, api.SwarmNamespace); err != nil {
 		return nil, err
 	}
 	return set, nil

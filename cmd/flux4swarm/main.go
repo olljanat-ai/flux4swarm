@@ -97,6 +97,14 @@ func main() {
 type globalOpts struct {
 	logLevel  string
 	logFormat string
+	namespace string
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 func newRoot() *cobra.Command {
@@ -107,11 +115,16 @@ func newRoot() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if err := api.SetSwarmNamespace(g.namespace); err != nil {
+				return err
+			}
 			return setupLogging(g)
 		},
 	}
 	root.PersistentFlags().StringVar(&g.logLevel, "log-level", "info", "debug, info, warn or error")
 	root.PersistentFlags().StringVar(&g.logFormat, "log-format", "text", "text or json")
+	root.PersistentFlags().StringVar(&g.namespace, "default-namespace", envOr(api.EnvSwarmNamespace, api.SwarmNamespace),
+		"Kubernetes namespace of Swarm objects without a stack (e.g. made with docker service create): import puts them there and reconcile deploys it without a stack prefix (env "+api.EnvSwarmNamespace+")")
 	root.AddCommand(newControllerCmd(false), newControllerCmd(true), newImportCmd(), newVersionCmd())
 	return root
 }
