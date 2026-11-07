@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -30,6 +31,7 @@ import (
 	"github.com/olljanat-ai/flux4swarm/internal/creds"
 	"github.com/olljanat-ai/flux4swarm/internal/git"
 	"github.com/olljanat-ai/flux4swarm/internal/importer"
+	"github.com/olljanat-ai/flux4swarm/internal/merge"
 	"github.com/olljanat-ai/flux4swarm/internal/swarm"
 )
 
@@ -553,6 +555,8 @@ func newImportCmd() *cobra.Command {
 		debounce       time.Duration
 		listen         string
 		unhealthyAfter time.Duration
+		mergeEnvs      []string
+		basePath       string
 	)
 	cmd := &cobra.Command{
 		Use:   "import",
@@ -560,7 +564,13 @@ func newImportCmd() *cobra.Command {
 		Long: "Export the Swarm once, or with --watch keep exporting it: Swarm stays the\n" +
 			"source of truth and Flux on Kubernetes follows the commits. In watch mode\n" +
 			"the export owns only <path>/apps and <path>/MIGRATION.md; files elsewhere (flux-system/, your own\n" +
-			"overlays and patches) are created once when missing and never overwritten.",
+			"overlays and patches) are created once when missing and never overwritten.\n\n" +
+			"With --merge, every export also regenerates the shared Kustomize base\n" +
+			"(--base-path) and the overlay clusters/ENV/apps of each listed environment\n" +
+			"already in the repository, as \"flux4swarm merge\" does. Run one watcher per\n" +
+			"Swarm with --cluster set to its environment and the same --merge list\n" +
+			"everywhere; a push that loses a race with another watcher is retried on\n" +
+			"the new tip.",
 		Args: cobra.NoArgs,
 	}
 	gf.register(cmd, "git-url")
@@ -581,12 +591,14 @@ func newImportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&author, "author", "flux4swarm", "commit author name")
 	cmd.Flags().StringVar(&email, "author-email", "flux4swarm@users.noreply.github.com", "commit author email")
 	cmd.Flags().StringVar(&credsDir, "credentials-dir", creds.DefaultDir, "directory with the --git-secret credentials")
-	cmd.Flags().BoolVar(&watch, "watch", false, "keep running: export again after every Swarm service, config or secret change and every --interval, and commit only when the export differs (Swarm stays the source of truth)")
+	cmd.Flags().BoolVar(&watch, "watch", false, "keep running: export again after every Swarm service, config or secret change and every --interval, and commit only when the export differs (Swarm stays the source of truth); with --merge, one watcher per Swarm can share a base")
 	cmd.Flags().BoolVar(&validate, "validate", true, "run a Flux-compatible kustomize build of <path> and the Flux Kustomizations in it before committing, and refuse to push when it fails (for example when an overlay patches a service that is gone from Swarm)")
 	cmd.Flags().DurationVar(&interval, "interval", 10*time.Minute, "with --watch: full resync period")
 	cmd.Flags().DurationVar(&debounce, "debounce", 5*time.Second, "with --watch: wait this long after a Swarm change before exporting, so one stack deploy gives one commit")
 	cmd.Flags().StringVar(&listen, "listen", ":9797", "with --watch: address for /healthz, /readyz, /status and /metrics; empty disables them")
 	cmd.Flags().DurationVar(&unhealthyAfter, "unhealthy-after", 0, "with --watch: /healthz fails and flux4swarm_watch_healthy is 0 when no export succeeded for this long (default 3 x --interval)")
+	cmd.Flags().StringArrayVar(&mergeEnvs, "merge", nil, "environment sharing a Kustomize base with --cluster (repeat for each, --cluster included, in the same order on every watcher; the first wins ties): rewrite --base-path and every listed clusters/ENV/apps after each export")
+	cmd.Flags().StringVar(&basePath, "base-path", merge.DefaultBasePath, "with --merge: directory of the shared base in the repository")
 
 	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
 		ctx := cmd.Context()
@@ -599,6 +611,14 @@ func newImportCmd() *cobra.Command {
 				return fmt.Errorf("--exclude: %w", err)
 			}
 			o.Exclude = re
+		}
+		if len(mergeEnvs) > 0 {
+			if o.Path != "" && strings.Trim(path.Clean(strings.TrimPrefix(o.Path, "./")), "/") != "clusters/"+o.Cluster {
+				return fmt.Errorf("--merge needs the default --path clusters/%s", o.Cluster)
+			}
+			if err := checkMergeEnvs(mergeEnvs, o.Cluster); err != nil {
+				return err
+			}
 		}
 		o.GitURL, o.Branch, o.GitProvider = gf.url, gf.branch, gf.provider
 		if gf.secretRef != "" {
@@ -624,8 +644,22 @@ func newImportCmd() *cobra.Command {
 			if err != nil {
 				return nil, err
 			}
+			var notes []string
+			write := func(root string) error {
+				if len(mergeEnvs) == 0 {
+					return res.WriteTo(root, watch)
+				}
+				n, err := writeMerged(root, res, watch, mergeEnvs, basePath)
+				notes = n
+				return err
+			}
+			printNotes := func() {
+				for _, n := range notes {
+					fmt.Println("note:", n)
+				}
+			}
 			if output != "" {
-				if err := res.WriteTo(output, watch); err != nil {
+				if err := write(output); err != nil {
 					return nil, err
 				}
 				if validate {
@@ -634,6 +668,7 @@ func newImportCmd() *cobra.Command {
 					}
 				}
 				fmt.Printf("wrote %d files to %s\n", len(res.Files), filepath.Join(output, res.Root))
+				printNotes()
 				return res, nil
 			}
 			verb := "Import"
@@ -655,7 +690,7 @@ func newImportCmd() *cobra.Command {
 				URL: gf.url, Branch: gf.branch, Message: msg, Describe: describe, Author: author, Email: email,
 				Auth: &git.AuthProvider{Provider: gf.provider, URL: gf.url, Secret: secret},
 				Write: func(root string) error {
-					if err := res.WriteTo(root, watch); err != nil {
+					if err := write(root); err != nil {
 						return err
 					}
 					if validate {
@@ -667,6 +702,7 @@ func newImportCmd() *cobra.Command {
 			if err != nil {
 				return nil, err
 			}
+			printNotes()
 			if pr.Changed {
 				pushed = pr.Commit
 				fmt.Printf("pushed %d files to %s (%s) commit %s\n", len(res.Files), gf.url, gf.branch, pr.Commit)

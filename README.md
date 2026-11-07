@@ -36,7 +36,9 @@ repository (`flux bootstrap` adds `gotk-components.yaml`). With several
 Swarms (development, acceptance, production), import each into its own
 `clusters/<env>` and run `flux4swarm merge` before reviewing, so the shared
 manifests live once in `apps/base` and each environment only keeps its
-differences (see [Several Swarms](#several-swarms-shared-base-and-per-environment-overlays)). Kubernetes-only
+differences (see [Several Swarms](#several-swarms-shared-base-and-per-environment-overlays));
+with `import --watch --merge ...` on every Swarm the base and overlays are
+kept up to date continuously. Kubernetes-only
 features (sidecars, httpGet probes, autoscalers, canaries, HelmReleases, ...)
 never fail the Swarm side: they are skipped with a warning, so new
 Kubernetes work can start while Swarm is still live. See
@@ -211,6 +213,30 @@ flux4swarm merge --env development --env production --output fleet
 
 Every overlay is checked to build back to exactly its import. See
 [docs/kubernetes-and-swarm.md](docs/kubernetes-and-swarm.md#several-environments-one-shared-base).
+
+#### Several Swarms with a shared base, continuously
+
+The recommended setup for live Swarms: one `import --watch` per Swarm
+(for example as a service like
+[deploy/flux4swarm-export-stack.yaml](deploy/flux4swarm-export-stack.yaml)
+on each Swarm), all pushing to the same repository with `--merge`:
+
+```sh
+flux4swarm import --watch --cluster production --bootstrap \
+  --merge development --merge acceptance --merge production \
+  --git-url https://github.com/acme/fleet
+```
+
+Each commit holds that Swarm's fresh export plus a deterministic
+regeneration of `apps/base` (`--base-path`) and every listed environment's
+overlay already in the repository, exactly as `merge` would write them.
+Each watcher only reads the Swarm of its own `--cluster`; the other
+environments come from their last commit, so their overlays keep building
+to the same objects. Give the same `--merge` list, in the same order, to
+every watcher (the first environment wins ties). Environments not exported
+yet are left out until they are. When two watchers push at the same time,
+the loser clones again and redoes its export on the new tip (up to 5 tries).
+`--merge` needs the default `--path`.
 
 ### Services outside a stack
 
