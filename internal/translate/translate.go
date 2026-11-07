@@ -29,14 +29,12 @@ import (
 	swarmapply "github.com/olljanat-ai/flux4swarm/internal/swarm"
 )
 
-// DefaultNamespace is the Kubernetes namespace that maps to no stack prefix.
-const DefaultNamespace = "default"
-
 // SwarmName returns the Swarm object name for a namespaced Kubernetes name:
-// "<namespace>_<name>", or just "<name>" in the default namespace. This is
-// the naming `docker stack deploy` uses.
+// "<namespace>_<name>", or just "<name>" in api.SwarmNamespace (the
+// --default-namespace, "default" unless set). This is the naming
+// `docker stack deploy` uses.
 func SwarmName(namespace, name string) string {
-	if namespace == "" || namespace == DefaultNamespace {
+	if namespace == "" || namespace == api.SwarmNamespace {
 		return name
 	}
 	return namespace + "_" + name
@@ -45,7 +43,7 @@ func SwarmName(namespace, name string) string {
 // NetworkName is the default overlay network of a namespace.
 func NetworkName(namespace string) string {
 	if namespace == "" {
-		namespace = DefaultNamespace
+		namespace = api.SwarmNamespace
 	}
 	return namespace + "_default"
 }
@@ -209,7 +207,7 @@ func (t *translator) workload(w *Workload) (*swarmapply.Service, error) {
 	name := w.ServiceName()
 
 	spec := swarm.ServiceSpec{Annotations: swarm.Annotations{Name: name, Labels: copyMap(w.Labels)}}
-	if w.Namespace != DefaultNamespace {
+	if w.Namespace != api.SwarmNamespace {
 		spec.Labels[api.LabelStackNamespace] = w.Namespace
 	}
 	cs := &swarm.ContainerSpec{
@@ -221,7 +219,7 @@ func (t *translator) workload(w *Workload) (*swarmapply.Service, error) {
 		TTY:       c.TTY,
 		OpenStdin: c.Stdin,
 	}
-	if w.Namespace != DefaultNamespace {
+	if w.Namespace != api.SwarmNamespace {
 		cs.Labels = map[string]string{api.LabelStackNamespace: w.Namespace}
 	}
 	env, err := t.env(w.Namespace, c)
@@ -657,7 +655,7 @@ func volumeMount(source string, vm corev1.VolumeMount, p *corev1.PersistentVolum
 			vo.DriverConfig = &mount.Driver{Name: driver, Options: opts}
 		}
 	}
-	if ns != DefaultNamespace {
+	if ns != api.SwarmNamespace {
 		l[api.LabelStackNamespace] = ns
 	}
 	if len(l) > 0 {
@@ -726,7 +724,7 @@ func (t *translator) addConfig(name string, data []byte, ns string) {
 	}
 	t.configs[name] = true
 	l := map[string]string{}
-	if ns != DefaultNamespace {
+	if ns != api.SwarmNamespace {
 		l[api.LabelStackNamespace] = ns
 	}
 	t.out.Desired.Configs = append(t.out.Desired.Configs, &swarmapply.Config{Name: name, Data: data, Labels: l})
@@ -738,7 +736,7 @@ func (t *translator) addSecret(name string, data []byte, ns, source string) {
 	}
 	t.secretObjs[name] = true
 	l := map[string]string{}
-	if ns != DefaultNamespace {
+	if ns != api.SwarmNamespace {
 		l[api.LabelStackNamespace] = ns
 	}
 	t.out.Desired.Secrets = append(t.out.Desired.Secrets, swarmapply.Secret{Name: name, Data: data, Labels: l, Source: ns + "/" + source})

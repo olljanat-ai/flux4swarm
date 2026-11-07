@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/swarm"
 
+	"github.com/olljanat-ai/flux4swarm/internal/api"
 	"github.com/olljanat-ai/flux4swarm/internal/build"
 	"github.com/olljanat-ai/flux4swarm/internal/render"
 	"github.com/olljanat-ai/flux4swarm/internal/secrets"
@@ -166,5 +167,69 @@ func TestExportRoundTrip(t *testing.T) {
 	}
 	if len(out.Desired.Secrets) != 1 || out.Desired.Secrets[0].Name != "shop_dbpw_dbpw" || string(out.Desired.Secrets[0].Data) != "REPLACE_ME" {
 		t.Errorf("secrets: %+v", out.Desired.Secrets)
+	}
+}
+
+// A service made with `docker service create` (no stack label) is imported
+// into --default-namespace, and reconciling that namespace gives the same
+// unprefixed service back.
+func TestExportPlainServiceDefaultNamespace(t *testing.T) {
+	prev := api.SwarmNamespace
+	t.Cleanup(func() { api.SwarmNamespace = prev })
+	if err := api.SetSwarmNamespace("team-a"); err != nil {
+		t.Fatal(err)
+	}
+	replicas := uint64(1)
+	fd := &fakeDocker{services: []swarm.Service{{ID: "svc1", Spec: swarm.ServiceSpec{
+		Annotations: swarm.Annotations{Name: "web"},
+		TaskTemplate: swarm.TaskSpec{ContainerSpec: &swarm.ContainerSpec{
+			Image: "nginx:1.27@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}},
+		Mode: swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: &replicas}},
+	}}}}
+	res, err := Export(context.Background(), fd, Options{Cluster: "prod", SecretStore: "fake", SecretStoreProvider: ProviderFake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"clusters/prod/apps/team-a/deployment-web.yaml", "clusters/prod/apps/team-a/namespace.yaml"} {
+		if _, ok := res.Files[want]; !ok {
+			t.Errorf("missing %s", want)
+		}
+	}
+	if dep := string(res.Files["clusters/prod/apps/team-a/deployment-web.yaml"]); !strings.Contains(dep, "namespace: team-a") {
+		t.Errorf("deployment not in team-a:\n%s", dep)
+	}
+	dir := t.TempDir()
+	for f, b := range res.Files {
+		p := filepath.Join(dir, filepath.FromSlash(f))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set, err := build.Build(dir, build.Options{Spec: specFor("./clusters/prod")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := render.Render(set, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Desired.Services) != 1 {
+		t.Fatalf("got %d services", len(out.Desired.Services))
+	}
+	got := out.Desired.Services[0]
+	if got.Name != "web" {
+		t.Fatalf("name %s, want web", got.Name)
+	}
+	if l := got.Spec.Labels[api.LabelStackNamespace]; l != "" {
+		t.Errorf("unexpected stack label %q", l)
+	}
+	want, _ := cleanService(fd.services[0].Spec, nil, nil, nil, false)
+	gen := got.Spec
+	normalize(&want, &gen)
+	if p, _ := translate.CreatePatch(gen, want); p != nil {
+		t.Errorf("round trip differs: %s", p)
 	}
 }

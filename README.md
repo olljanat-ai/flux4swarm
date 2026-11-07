@@ -112,6 +112,26 @@ Only labels are changed, so no task restarts. Services that use secrets are
 left for the first reconcile, because their new secret versions are created
 from the secret store.
 
+### Services outside a stack
+
+Services, configs and secrets without a `com.docker.stack.namespace` label
+(made with `docker service create` and friends) go to the namespace given
+with `--default-namespace` (env `FLUX4SWARM_DEFAULT_NAMESPACE`, default
+`default`). The controller treats that namespace the same way: objects in it
+are deployed without a `<namespace>_` prefix or stack label, and manifests
+without `metadata.namespace` land in it. To move several dedicated Swarms
+into one shared Kubernetes cluster, give each its own namespace and use the
+same value for `import` and `controller`:
+
+```sh
+flux4swarm import --default-namespace team-a --cluster prod --output ./fleet
+flux4swarm controller --default-namespace team-a --config clusters/prod/flux-system/gotk-sync.yaml
+```
+
+Stacks keep mapping to the namespace of the same name. Don't pick a default
+namespace that is also a stack name on that Swarm, because both would then
+share one Kubernetes namespace.
+
 ## Run the GitOps controller
 
 ```sh
@@ -202,7 +222,7 @@ types `generic`, `generic-hmac`, `slack`, `msteams`, `github`,
 
 | Kubernetes | Swarm |
 |------------|-------|
-| Namespace `shop` | Docker stack `shop`: names `shop_<name>`, label `com.docker.stack.namespace`, network `shop_default` (namespace `default` has no prefix) |
+| Namespace `shop` | Docker stack `shop`: names `shop_<name>`, label `com.docker.stack.namespace`, network `shop_default` (the `--default-namespace`, `default` unless set, has no prefix) |
 | Deployment / StatefulSet / DaemonSet / Job | replicated / replicated (slot-templated volumes) / global / replicated-job service |
 | Service `LoadBalancer` / `NodePort` | published ports (`externalTrafficPolicy: Local` = host mode) |
 | Service (any) | network alias, so `http://<service>` resolves like in Kubernetes |
