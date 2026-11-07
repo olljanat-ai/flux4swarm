@@ -4,28 +4,33 @@ package e2e
 
 import (
 	"testing"
-	"time"
 )
 
-// TestReconcileService walks one service through create -> update -> prune.
+// TestReconcileService walks one Deployment through create -> update -> prune
+// on Swarm. Deployment web in namespace NS becomes Swarm service NS_web.
 func TestReconcileService(t *testing.T) {
 	requireController(t)
 	repo := newGitRepo(t)
-	svc := uniq("rec")
+	ns := uniq("rec")
+	svc := swarmServiceName(ns, "web")
 	unmanaged := uniq("unmanaged")
-	cleanupObjects(t, "service", svc, unmanaged)
+	cleanupStack(t, ns)
+	cleanupServices(t, unmanaged)
 
 	ok := t.Run("create", func(t *testing.T) {
-		repo.write(servicePath(svc), serviceYAML(svc, imageV1, 1))
-		repo.commitPush("add " + svc)
+		repo.setApp(ns, map[string]string{"deployment-web.yaml": deploymentYAML(app{NS: ns, Name: "web", Image: imageV1, Replicas: 1})})
+		repo.commitPush("add " + ns + "/web")
 		reconcile(t, repo)
 
 		s := mustService(t, svc)
 		if s.image() != imageV1 || s.replicas() != 1 {
 			t.Fatalf("got image=%q replicas=%d, want %s/1", s.image(), s.replicas(), imageV1)
 		}
-		if s.Spec.Labels["app.kubernetes.io/managed-by"] != "flux4swarm" {
-			t.Errorf("missing label %s; labels: %v", managedByLabel, s.Spec.Labels)
+		if s.Spec.Labels[managedByKey] != managedByVal {
+			t.Errorf("missing label %s=%s; labels: %v", managedByKey, managedByVal, s.Spec.Labels)
+		}
+		if s.Spec.Labels[stackKey] != ns {
+			t.Errorf("missing label %s=%s; labels: %v", stackKey, ns, s.Spec.Labels)
 		}
 		waitServiceRunning(t, svc, 1)
 	})
@@ -34,8 +39,8 @@ func TestReconcileService(t *testing.T) {
 	}
 
 	ok = t.Run("update", func(t *testing.T) {
-		repo.write(servicePath(svc), serviceYAML(svc, imageV2, 2))
-		repo.commitPush("update " + svc)
+		repo.setApp(ns, map[string]string{"deployment-web.yaml": deploymentYAML(app{NS: ns, Name: "web", Image: imageV2, Replicas: 2})})
+		repo.commitPush("update " + ns + "/web")
 		reconcile(t, repo)
 
 		s := mustService(t, svc)
@@ -53,39 +58,52 @@ func TestReconcileService(t *testing.T) {
 		docker(t, "service", "create", "--detach", "--name", unmanaged,
 			"--label", e2eLabel, "--replicas", "0", imageV1)
 
-		repo.remove(servicePath(svc))
-		repo.commitPush("remove " + svc)
+		repo.setApp(ns, nil)
+		repo.commitPush("remove " + ns)
 		reconcile(t, repo, "--prune")
 
-		eventually(t, time.Minute, "service "+svc+" pruned", func() (bool, string) {
-			_, exists := inspectService(t, svc)
-			return !exists, "still exists"
-		})
+		waitServiceGone(t, svc)
 		if _, exists := inspectService(t, unmanaged); !exists {
 			t.Fatalf("unmanaged service %s was pruned", unmanaged)
 		}
 	})
 }
 
-// TestReconcileConfigAndSecret: a Config and an ExternalSecret backed by the
-// fake SecretStore become Swarm objects (named NAME-<hash>, found by label).
+// TestReconcileConfigAndSecret: a ConfigMap and an ExternalSecret (ESO fake
+// SecretStore), both mounted by a Deployment, become one Swarm config and one
+// Swarm secret (NS_OBJECT_KEY-HASH10, labelled flux4swarm.io/name), and the
+// task container sees the right file contents.
 func TestReconcileConfigAndSecret(t *testing.T) {
 	requireController(t)
 	repo := newGitRepo(t)
-	cfg, sec := uniq("rec-cfg"), uniq("rec-sec")
-	cleanupObjects(t, "config", cfg)
-	cleanupObjects(t, "secret", sec)
+	ns := uniq("cfg")
+	cleanupStack(t, ns)
 
-	repo.write(configPath(cfg), configYAML(cfg, "hello from git\n"))
-	repo.write(secretStorePath(), secretStoreYAML("e2e-key", "e2e-value"))
-	repo.write(secretPath(sec), externalSecretYAML(sec, "e2e-key"))
+	const key, cfgVal, secVal = "greeting", "hello from git", "s3cr3t-from-store"
+	repo.setApp(ns, map[string]string{
+		"configmap-web-config.yaml":      configMapYAML(ns, "web-config", key, cfgVal),
+		"secretstore.yaml":               secretStoreYAML(ns, "e2e-key", secVal),
+		"externalsecret-web-secret.yaml": externalSecretYAML(ns, "web-secret", key, "e2e-key"),
+		"deployment-web.yaml": deploymentYAML(app{NS: ns, Name: "web", Image: imageV1, Replicas: 1,
+			ConfigMap: "web-config", Secret: "web-secret", Key: key}),
+	})
 	repo.commitPush("add config and secret")
 	reconcile(t, repo)
 
-	if got := objectsByLabel(t, "config", nameLabel+"="+cfg); len(got) != 1 {
-		t.Errorf("want 1 config labelled %s=%s, got %v", nameLabel, cfg, got)
+	if got := versionedObjects(t, "config", ns, "web-config", key); len(got) != 1 {
+		t.Errorf("want 1 Swarm config %s, got %v (all labelled: %v)", versionedNameRE(ns, "web-config", key),
+			got, objectsByLabel(t, "config", nameLabel))
 	}
-	if got := objectsByLabel(t, "secret", nameLabel+"="+sec); len(got) != 1 {
-		t.Errorf("want 1 secret labelled %s=%s, got %v", nameLabel, sec, got)
+	if got := versionedObjects(t, "secret", ns, "web-secret", key); len(got) != 1 {
+		t.Errorf("want 1 Swarm secret %s, got %v (all labelled: %v)", versionedNameRE(ns, "web-secret", key),
+			got, objectsByLabel(t, "secret", nameLabel))
+	}
+	svc := swarmServiceName(ns, "web")
+	waitServiceRunning(t, svc, 1)
+	if got := serviceFile(t, svc, configMountPath+"/"+key); got != cfgVal {
+		t.Errorf("%s in %s = %q, want %q", configMountPath+"/"+key, svc, got, cfgVal)
+	}
+	if got := serviceFile(t, svc, secretMountPath+"/"+key); got != secVal {
+		t.Errorf("%s in %s = %q, want %q", secretMountPath+"/"+key, svc, got, secVal)
 	}
 }
