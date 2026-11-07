@@ -172,3 +172,98 @@ service from Swarm, or keep it on Swarm and `--exclude` it from the export.
 The next export drops it from `apps/`, and Flux keeps the copy you own.
 When everything has moved, stop `import --watch`; the repository is then an
 ordinary Flux repository.
+
+## Several environments: one shared base
+
+Most teams run the same stacks on several Swarms, for example development,
+acceptance and production. `flux4swarm merge` turns their imports into one
+Kustomize base with what they share and a small overlay per environment
+with only what differs, so a change to the shared part is made once.
+
+1. Import every Swarm into its own cluster directory of the same
+   repository (point `DOCKER_HOST` or `docker context` at each Swarm):
+
+   ```sh
+   DOCKER_HOST=ssh://dev-manager  flux4swarm import --cluster development --bootstrap --output fleet
+   DOCKER_HOST=ssh://acc-manager  flux4swarm import --cluster acceptance  --bootstrap --output fleet
+   DOCKER_HOST=ssh://prod-manager flux4swarm import --cluster production  --bootstrap --output fleet
+   ```
+
+   (or `--git-url` instead of `--output`, one commit per Swarm.)
+
+2. Merge them:
+
+   ```sh
+   flux4swarm merge --env development --env acceptance --env production --output fleet
+   # or: flux4swarm merge --env ... --git-url https://github.com/acme/fleet --branch main
+   ```
+
+The result:
+
+```
+apps/base/                     # owned by merge: what the environments share
+  shop/deployment-web.yaml
+  shop/kustomization.yaml
+  kustomization.yaml
+clusters/
+  development/
+    flux-system/               # from import --bootstrap: Kustomization path ./clusters/development
+    apps/                      # owned by merge: the development overlay
+      kustomization.yaml       # resources: [../../../apps/base, own objects], patches: [...]
+      shop/deployment-web-patch.yaml
+      shop/configmap-debug.yaml  # an object only development has
+  acceptance/...
+  production/...
+```
+
+How the base is chosen: a field goes into the base when more than half of
+the environments have the same value (with two environments, both must
+agree). Maps and lists keyed by `name` (containers, env vars, volumes,
+ports with names) are compared field by field, so with production on
+`nginx:1.26` and three replicas, and development and acceptance on
+`nginx:1.27` and one replica, the base holds `nginx:1.27` and `replicas: 1`
+and only production's overlay has a patch:
+
+```yaml
+# clusters/production/apps/shop/deployment-web-patch.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: shop
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+      - name: web
+        image: nginx:1.26
+```
+
+Objects that exist in every environment go to the base; the others are
+written whole into the overlays of the environments that have them. The
+patches are standard kustomize strategic merge patches (ConfigMap data,
+HTTPRoute hostnames from Traefik `Host()` rules, ExternalSecret keys and
+the `swarm.flux4swarm.io/service-spec` annotation are replaced as a
+whole); when list order cannot be expressed that way, merge writes a
+JSON6902 patch with a `target` instead. Before writing anything, merge
+builds every overlay with stock kustomize (root-only load restrictions)
+and checks that it gives exactly the objects of that environment's import,
+so reconciling an environment after the merge changes nothing on its
+Swarm, and Flux on Kubernetes gets the same objects.
+
+To pick up later changes, import the environment again and merge again:
+import replaces `clusters/<env>/apps` with a full export, and merge reads
+every environment (a plain export or an earlier overlay, built with
+kustomize) and writes the base and all overlays again. Only `apps/base`
+(`--base-path`) and `clusters/<env>/apps` are rewritten; `flux-system/`,
+a root `kustomization.yaml` and directories such as `platform/` are left
+alone, so the [ownership rules above](#who-owns-which-file) still apply
+per environment. `--env NAME=DIR` reads an environment from a separate
+local import (`DIR/clusters/NAME/apps`) instead of the target repository.
+
+Merge is one-shot. Don't run `import --watch` on an environment that is
+merged: every export would replace its overlay with a full copy again, and
+the next merge would have to undo that. Use `import --watch` per
+environment without merge, or import and merge on a schedule (for example
+a CI job) instead.

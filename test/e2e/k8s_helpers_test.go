@@ -171,6 +171,8 @@ type fluxSyncOpts struct {
 	// (spec.wait). Off for imported trees whose images may be pinned to
 	// digests that are not preloaded into kind.
 	Wait bool
+	// Path is the cluster directory to deploy (default clusters/e2e).
+	Path string
 }
 
 func (k *k8s) sync(t *testing.T, repo *gitRepo, opts fluxSyncOpts) *fluxSync {
@@ -179,6 +181,10 @@ func (k *k8s) sync(t *testing.T, repo *gitRepo, opts fluxSyncOpts) *fluxSync {
 		t.Fatal("repo is not served by the git server")
 	}
 	s := &fluxSync{k: k, repo: repo, Name: uniq("sync")}
+	path := opts.Path
+	if path == "" {
+		path = clusterPath
+	}
 	k.applyYAML(t, `apiVersion: source.toolkit.fluxcd.io/v1
 kind: GitRepository
 metadata:
@@ -190,7 +196,7 @@ spec:
   ref:
     branch: `+branch+`
   ignore: |
-    /`+fluxSysPath+`/
+    /`+path+`/flux-system/
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
@@ -199,7 +205,7 @@ metadata:
   namespace: flux-system
 spec:
   interval: 1m
-  path: ./`+clusterPath+`
+  path: ./`+path+`
   prune: true
   wait: `+boolStr(opts.Wait)+`
   timeout: 3m
