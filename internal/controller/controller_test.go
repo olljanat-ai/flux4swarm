@@ -222,7 +222,7 @@ spec:
 				s.DependsOn = []api.DependencyReference{{Name: "infra"}}
 			}),
 			reason: ReasonDependencyNotReady,
-			msg:    "dependency 'flux-system/infra' is not ready",
+			msg:    "dependency 'flux-system/infra' not found",
 		},
 	}
 	for name, tc := range cases {
