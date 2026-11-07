@@ -1,221 +1,227 @@
 # flux4swarm architecture
 
-flux4swarm is a GitOps controller for Docker Swarm modelled on
-[Flux v2](https://github.com/fluxcd/flux2). Flux is built from several
-Kubernetes controllers that watch custom resources in the API server. Docker
-Swarm has no custom resources and no API server we can extend, so flux4swarm
-packs the relevant parts of Flux into one process that keeps its objects in
-memory and talks to the Docker Engine API on a Swarm manager.
+flux4swarm lets one Git repository drive both stock Flux v2 on Kubernetes
+and Docker Swarm. The repository contains only formats Flux understands:
+Flux objects, plain Kubernetes manifests, External Secrets Operator (ESO)
+objects, Gateway API routes and (optionally) Traefik Middleware CRDs.
+flux4swarm reproduces what Flux's source-controller and kustomize-controller
+do, and replaces "apply to the Kubernetes API" with "translate to Docker
+Swarm and apply to the Docker Engine API".
 
 ```
-                 ┌──────────────────────────── flux4swarm controller ───────────────────────────┐
-  Git (GitHub /  │  ┌──────────────────┐  artifact  ┌──────────────────────┐  apply  ┌────────┐ │
-  Azure DevOps / │─▶│ source reconciler │──────────▶│ kustomization        │────────▶│ swarm  │─┼─▶ Docker Engine API
-  any Git host)  │  │ (GitRepository)   │ (revision │ reconciler           │  prune  │ applier│ │   (Swarm manager)
-                 │  └──────────────────┘  + files) │ (Kustomization)      │  wait   └────────┘ │
-                 │                                  │   │ ExternalSecret      │                   │
-                 │                                  │   ▼                     │                   │
-                 │                                  │ secret store providers  │──▶ Vault / Azure Key Vault / fake
-                 │                                  └──────────────────────┘                   │
-                 │   status: /healthz /readyz /status (JSON) /metrics                           │
-                 └───────────────────────────────────────────────────────────────────────────────┘
+ Git (GitHub, Azure DevOps, any)            flux4swarm (one process on a Swarm manager)
+ ───────────────────────────────            ───────────────────────────────────────────
+ clusters/prod/flux-system/      ──fetch──▶ source reconciler (GitRepository, go-git)
+   gotk-sync.yaml                                │ artifact <branch>@sha1:<commit>
+ clusters/prod/apps/<ns>/*.yaml                  ▼
+   Deployment, Service, ConfigMap,          kustomization reconciler
+   PVC, ExternalSecret, HTTPRoute ...         1. kustomize build (krusty), Flux overlays,
+                                                 postBuild substitution
+ Secret stores                                2. resolve ExternalSecrets ◀── Vault / Azure Key Vault / fake
+                                              3. HTTPRoute → Traefik labels
+                                              4. Kubernetes → Swarm translation
+                                              5. apply, wait, prune ──────────▶ Docker Engine API
+                                            status: /status /metrics /healthz /readyz
 ```
 
 ## Modes
 
-The binary has two modes, chosen by sub-command.
+| Mode | Command | Flux equivalent |
+|------|---------|-----------------|
+| GitOps | `flux4swarm controller`, `flux4swarm reconcile` (one pass) | source-controller + kustomize-controller |
+| Import | `flux4swarm import` | `flux bootstrap` + exporting existing workloads |
 
-| Mode | Command | Flux equivalent | What it does |
-|------|---------|-----------------|--------------|
-| GitOps | `flux4swarm controller` (and `flux4swarm reconcile` for a single pass) | source-controller + kustomize-controller | Pulls Git, applies the manifests to Swarm, prunes what was removed, waits for services to converge. |
-| Import | `flux4swarm import` | `flux bootstrap` + `flux export` | Reads the services, configs, secrets and networks of an existing Swarm, writes them as manifests (secrets as `ExternalSecret`) and commits/pushes them to GitHub or Azure DevOps. Optionally writes the `flux-system` sync manifests so the controller can take over. |
+## Packages
 
-## API objects
+| Package | Role |
+|---------|------|
+| `internal/git` | go-git fetch (Flux revision format) and commit/push; auth for PAT, bearer, SSH, GitHub App, Azure Entra ID |
+| `internal/build` | Flux-compatible kustomize build |
+| `internal/api` | Flux and ESO types, decoding of a build into typed Kubernetes objects |
+| `internal/secrets` | ESO providers: `vault`, `azurekv`, `fake` |
+| `internal/traefik` | HTTPRoute/Middleware ↔ Traefik Swarm provider labels, Traefik rule parser |
+| `internal/translate` | Kubernetes workloads → Swarm service specs, configs, secrets, networks |
+| `internal/render` | traefik + translate for one build |
+| `internal/swarm` | applier: ownership labels, versioned configs/secrets, drift detection, prune, wait |
+| `internal/swarm/tfdocker` | code derived from terraform-provider-docker (MPL-2.0) |
+| `internal/controller` | reconcile loop, dependency ordering, status and metrics |
+| `internal/importer` | Swarm → Kubernetes manifests with lossless round trip |
 
-All objects are Kubernetes-style YAML (`apiVersion`, `kind`, `metadata`, `spec`),
-several per file separated by `---`. `metadata.namespace` is accepted and kept
-in labels for Flux compatibility, but Swarm itself has no namespaces.
+## Build (kustomize-controller compatible)
 
-### Flux objects (unchanged API groups)
+1. The source checkout is copied to a temporary directory (symlinks that
+   leave the source are dropped, like Flux's secure filesystem).
+2. If `spec.path` has no `kustomization.yaml`, one is generated listing
+   every manifest file and every sub-directory that has its own
+   kustomization, as Flux does.
+3. The Kustomization's `targetNamespace`, `namePrefix`, `nameSuffix`,
+   `patches`, `images` and `components` are written into that
+   kustomization, then `krusty` builds it (`LoadRestrictionsNone`).
+4. `commonMetadata` is applied to every object, then `postBuild.substitute`
+   (and `substituteFrom`) variables are replaced with drone/envsubst,
+   honouring `kustomize.toolkit.fluxcd.io/substitute: disabled`.
+5. Objects are decoded. Objects without a namespace go to `default`.
+   Objects labelled `app.kubernetes.io/part-of: flux` (gotk-components),
+   annotated `swarm.flux4swarm.io/ignore: "true"` or
+   `kustomize.toolkit.fluxcd.io/reconcile: disabled`, and kinds with no
+   Swarm meaning are recorded as ignored.
 
-* `source.toolkit.fluxcd.io/v1` **GitRepository**: `spec.url`, `spec.ref`
-  (`branch`, `tag`, `semver` is not supported, `commit`), `spec.interval`,
-  `spec.timeout`, `spec.secretRef`, `spec.provider` (`generic`, `github`,
-  `azure`), `spec.suspend`.
-* `kustomize.toolkit.fluxcd.io/v1` **Kustomization**: `spec.sourceRef`,
-  `spec.path`, `spec.interval`, `spec.retryInterval`, `spec.timeout`,
-  `spec.prune`, `spec.wait`, `spec.suspend`, `spec.dependsOn`.
+GitRepository and Kustomization objects found in a build are registered
+with the controller, which gives the usual self-managing `flux-system`
+setup. They are garbage collected when removed from Git if the parent has
+`prune: true`.
 
-GitRepository and Kustomization objects found inside a synced path are
-registered with the controller, exactly as Flux's self-managing
-`flux-system` Kustomization does. They are removed again when they disappear
-from Git (if the parent Kustomization has `prune: true`).
+## Translation
 
-### Swarm objects (`swarm.flux4swarm.io/v1alpha1`)
+### Naming: namespace = stack
 
-* **Service**: `spec` is a Docker Engine API
-  [`ServiceSpec`](https://docs.docker.com/reference/api/engine/version/v1.47/#tag/Service/operation/ServiceCreate)
-  verbatim (PascalCase keys such as `TaskTemplate.ContainerSpec.Image`).
-  `metadata.name` is the service name. Configs and secrets are referenced by
-  their logical names (`ConfigName`, `SecretName`); IDs are filled in by the
-  controller. Networks are referenced by name in `TaskTemplate.Networks[].Target`.
-* **Config**: `spec.data` (UTF-8 text) or `spec.binaryData` (base64),
-  `spec.labels`, `spec.templating` (Docker template driver name).
-* **Network**: `spec` is a Docker `NetworkCreate` request (`Driver`,
-  `Attachable`, `Internal`, `Options`, `IPAM`, `Labels`). Networks are
-  immutable; they are created once and only removed when pruned and unused.
+A Kubernetes namespace is a Docker stack, exactly like `docker stack
+deploy`: object `web` in namespace `shop` becomes `shop_web` with label
+`com.docker.stack.namespace=shop`; namespace `default` has no prefix. Every
+workload joins the overlay network `<ns>_default` (created on demand) and
+gets the names of the Kubernetes Services that select it as network aliases,
+so in-cluster DNS names keep working.
 
-### Secrets (`external-secrets.io/v1`)
+### Workloads
 
-Plain secrets never go to Git. A Docker secret is described with an
-External Secrets Operator **ExternalSecret** that points at a
-**SecretStore** or **ClusterSecretStore**. The controller fetches the value
-from the store at apply time and creates the Docker secret.
+| Kubernetes | Swarm ServiceSpec |
+|------------|-------------------|
+| Deployment `replicas` | `Mode.Replicated.Replicas` |
+| DaemonSet | `Mode.Global` |
+| StatefulSet | replicated; `volumeClaimTemplates` become volumes `<ns>_<tpl>-<sts>-{{.Task.Slot}}` |
+| Job `parallelism`/`completions`/`backoffLimit`, `restartPolicy` | `Mode.ReplicatedJob`, `RestartPolicy` |
+| Deployment strategy with surge (default) | `UpdateConfig{Parallelism: 1, Order: start-first}`; `maxSurge: 0` keeps the Swarm default |
+| container `image`, `command`, `args`, `workingDir`, `tty`, `stdin` | `Image`, `Command`, `Args`, `Dir`, `TTY`, `OpenStdin` |
+| `env` (`value`, `configMapKeyRef`, `secretKeyRef`, `fieldRef` name/node/namespace), `envFrom` | `Env` (values inlined) |
+| `securityContext` runAsUser/Group, readOnlyRootFilesystem, capabilities | `User`, `ReadOnly`, `CapabilityAdd/Drop` |
+| `resources.limits/requests` cpu, memory | `Resources.Limits/Reservations` |
+| `nodeSelector` (hostname, os, arch, control-plane, others) | placement constraints |
+| exec liveness/readiness/startup probe | `Healthcheck` |
+| `terminationGracePeriodSeconds`, `hostname`, `dnsConfig`, `hostAliases` | `StopGracePeriod`, `Hostname`, `DNSConfig`, `Hosts` |
+| `imagePullSecrets` (dockerconfigjson) | registry auth on create/update |
+| workload `metadata.labels` | service labels |
 
-* `ExternalSecret.spec.target.name` (default: `metadata.name`) is the Docker
-  secret name. With one `spec.data` entry the secret holds that value. With
-  several entries, one Docker secret per entry is created, named
-  `<target>-<secretKey>`. `spec.dataFrom` is not supported.
-* Supported store providers: `vault` (KV v1/v2, token or AppRole auth),
-  `azurekv` (service principal client secret), `fake` (static values, for
-  tests and demos). Other providers can be added behind the `Provider`
-  interface in `internal/secrets`.
-* ESO references Kubernetes secrets for store credentials
-  (`{name: x, key: y}`). flux4swarm resolves those to files in the
-  credentials directory (`--credentials-dir`, default `/run/secrets`):
-  first `<dir>/<name>/<key>`, then `<dir>/<name>_<key>`. When the controller
-  runs as a Swarm service, these are ordinary Docker secrets mounted into it.
-  The same lookup is used for `GitRepository.spec.secretRef`.
+One container per pod: Swarm services run one container, so pods with
+sidecars are rejected with a clear error. Init containers are ignored with a
+warning.
 
-## Reconciliation
+### Volumes
 
-### Source reconciler
+| Volume | Mount |
+|--------|-------|
+| `configMap` (items, defaultMode, subPath) | one Docker config per key, file at `mountPath/<path>` or `mountPath` with `subPath` |
+| `secret` | one Docker secret per key, same rules |
+| `persistentVolumeClaim` | named volume `<ns>_<claim>` (stack label added); `swarm.flux4swarm.io/volume-driver` and `swarm.flux4swarm.io/volume-options` (JSON) on the PVC set the driver |
+| `emptyDir` / `emptyDir: {medium: Memory}` | anonymous volume / tmpfs (with `sizeLimit`) |
+| `hostPath` | bind mount |
 
-Every `spec.interval` the GitRepository is fetched into a cache directory with
-[go-git](https://github.com/go-git/go-git) (pure Go, no `git` binary needed).
-The artifact revision uses the Flux format `<branch>@sha1:<commit>`.
-Authentication follows Flux's secret keys:
+Volumes are never deleted by prune.
 
-| Source | `spec.provider` | Keys in `secretRef` |
-|--------|-----------------|---------------------|
-| Any HTTPS host (GitHub, Azure DevOps, GitLab, Gitea...) | `generic` | `username` + `password` (PAT), or `bearerToken` |
-| Any SSH host | `generic` | `identity`, `known_hosts`, optional `password` |
-| GitHub App | `github` | `githubAppID`, `githubAppInstallationID`, `githubAppPrivateKey`, optional `githubAppBaseURL` |
-| Azure DevOps with Entra ID | `azure` | `tenantId`, `clientId`, `clientSecret` (service principal; Flux uses workload identity here, which Swarm does not have) |
+### Services and ports
 
-For GitHub a PAT works with any username. For Azure DevOps a PAT works with
-any non-empty username. go-git >= 5.11 speaks the `multi_ack` protocol
-that Azure DevOps requires.
+`LoadBalancer` Services publish `port` (ingress mode, host mode with
+`externalTrafficPolicy: Local`), `NodePort` Services publish `nodePort`.
+Named `targetPort`s are resolved against the container ports. Headless
+Services switch the endpoint mode to `dnsrr`. ClusterIP Services only add
+aliases (Swarm VIPs cannot remap ports).
 
-### Kustomization reconciler
+### Secrets
 
-1. Wait for the source artifact and for every `dependsOn` Kustomization to be Ready.
-2. **Build**: read every `*.yaml`/`*.yml` below `spec.path`, recursively.
-   If a directory has a `kustomization.yaml`, only the files and directories
-   listed in its `resources:` are read (a subset of kustomize; patches,
-   generators and overlays are not supported, see *Limitations*).
-3. **Resolve secrets** for every `ExternalSecret` through its store.
-4. **Apply** in dependency order: Networks, Configs, Secrets, Services, then
-   Flux objects are registered.
-5. **Prune** (if `spec.prune`): remove Services, then unreferenced
-   Configs/Secrets, then unused Networks that carry this Kustomization's
-   ownership labels but are no longer in the build.
-6. **Wait** (if `spec.wait`): wait until every replicated service has all
-   replicas running and every update is complete, up to `spec.timeout`. A
-   rollback or paused update makes the Kustomization not Ready.
-7. Record the status (Ready condition, last applied revision, inventory).
+ExternalSecrets are resolved into the Secret ESO would create
+(`spec.target.name`, one key per `spec.data[].secretKey`; `dataFrom` is not
+supported). Plain Kubernetes Secrets are used as is; SOPS encrypted Secrets
+are rejected. Store credentials (`{name, key}` references) are files in the
+credentials directory: `<dir>/<name>/<key>` or `<dir>/<name>_<key>`.
 
-### Ownership labels
+### Traefik and Gateway API
 
-Every object the controller creates gets the Flux kustomize-controller labels:
+Each HTTPRoute rule becomes a Traefik router on the Swarm service behind its
+first `backendRef` (found through the Kubernetes Service selector):
 
-```
-kustomize.toolkit.fluxcd.io/name: <kustomization name>
-kustomize.toolkit.fluxcd.io/namespace: <kustomization namespace>
-```
+| Gateway API | Traefik label |
+|-------------|---------------|
+| route name (`<name>-<i>` for several rules) | router and service name |
+| `hostnames`, `matches` (path prefix/exact/regex, method, headers, query) | `routers.<r>.rule` |
+| `parentRefs[].sectionName` (listener) | `routers.<r>.entrypoints` |
+| parentRef without `sectionName` | no `entrypoints` label (all entrypoints) |
+| HTTPS listener on the Gateway (or `websecure`); without `sectionName` only when every listener is HTTPS | `routers.<r>.tls=true` |
+| annotations `swarm.flux4swarm.io/traefik-certresolver`, `-priority` | `tls.certresolver`, `priority` |
+| backendRef port → container port | `services.<r>.loadbalancer.server.port` |
+| `RequestRedirect` scheme | `redirectscheme` middleware |
+| `URLRewrite` ReplacePrefixMatch `/` / ReplaceFullPath | `stripprefix` / `replacepath` middleware |
+| `RequestHeaderModifier` / `ResponseHeaderModifier` | `headers.customrequestheaders` / `customresponseheaders` |
+| `ExtensionRef` to `traefik.io/v1alpha1` Middleware | the Middleware spec flattened into `middlewares.<name>.*`; `basicAuth.secret` users are read from the Secret |
 
-plus `app.kubernetes.io/managed-by: flux4swarm` and, on services, a
-`flux4swarm.io/spec-hash` label. Pruning only touches objects with these
-labels, so objects created by hand or by `docker stack deploy` are never
-deleted unless they are adopted (see Import below).
+Import does the reverse with a parser for the rule subset that HTTPRoute
+can express. Routers it cannot express stay as labels (through the
+service-spec annotation).
 
-### Immutable configs and secrets
+## Applying to Swarm
 
-Docker configs and secrets cannot be changed once created. The controller
-uses the approach Docker users know from `terraform-provider-docker` and
-compose `name:` suffixes: the Swarm object is named
-`<logical-name>-<first 10 hex chars of sha256(data)>` and labelled
-`flux4swarm.io/name: <logical-name>`. Service references are rewritten to the
-current version, so changing the content in Git rolls the service, and the
-old version is pruned once no service uses it.
+* **Ownership** uses kustomize-controller's labels
+  `kustomize.toolkit.fluxcd.io/name` and `/namespace`, plus
+  `app.kubernetes.io/managed-by: flux4swarm`. Prune only touches owned
+  objects.
+* **Configs and secrets** are immutable in Swarm, so each is created as
+  `<logical name>-<hash>` with label `flux4swarm.io/name`; service
+  references are rewritten to the current version. Config hashes are
+  SHA-256 of the content; secret hashes are HMAC-SHA256 keyed with the
+  Swarm cluster ID so names reveal nothing portable about values. Old
+  versions are deleted once neither the service spec nor its previous spec
+  (needed for rollback) uses them. On adoption an unmanaged config with
+  identical content is reused, so taking over a Swarm does not roll services
+  for nothing.
+* **Services** carry `flux4swarm.io/spec-hash`, a hash of the desired spec.
+  A service is updated when the hash differs, when it is not labelled yet
+  (adoption) or when image, replicas or labels drifted. Updates send the
+  registry auth and query the registry for the digest like `docker service
+  update`. With `spec.force` a failing update recreates the service.
+* **Wait** (`spec.wait`) uses the convergence checker from
+  terraform-provider-docker: all replicas running in their slots on active
+  nodes, update completed; rollbacks and paused updates fail the
+  Kustomization.
+* **Prune** (`spec.prune`) removes owned services, then unused configs,
+  secrets and networks that left the build.
 
-### Service drift
+## Import
 
-Docker fills defaults into a stored `ServiceSpec`, so comparing desired and
-live specs field by field gives false positives. The controller stores a hash
-of the desired spec in `flux4swarm.io/spec-hash` and updates the service when
-the hash differs, when the label is missing (adoption) or when the live
-image, replica count or labels were changed by hand.
+`flux4swarm import` reads services, configs, secrets and networks and writes
+the layout shown in the README. For each service it:
 
-### Code borrowed from terraform-provider-docker
+1. cleans runtime data (IDs, digests unless `--adopt`, daemon defaults such
+   as platforms, isolation and runtime),
+2. builds the Kubernetes workload, Services (ClusterIP for Traefik backend
+   ports, LoadBalancer for published ports), ConfigMaps, ExternalSecrets,
+   PVCs, HTTPRoutes and Middlewares,
+3. renders those manifests back through the same translation used by the
+   controller and stores the JSON merge patch between the result and the
+   live spec in `swarm.flux4swarm.io/service-spec`. The import fails if the
+   patch does not reproduce the live spec, so reconciling an import is
+   lossless.
+4. with `--adopt`, after the files are written, adds the owner and
+   `flux4swarm.io/spec-hash` labels to each live service whose rendered spec
+   matches, so the first reconcile is a no-op.
 
-`internal/swarm/tfdocker` contains code adapted from
+Secret values are not readable from Docker; the generated SecretStore
+(`vault`, `azurekv` or `fake` template) and ExternalSecrets name the keys
+to fill in. Output goes to `--output` or is committed and pushed to
+`--git-url` (GitHub, Azure DevOps or any Git server; an empty repository is
+initialised).
+
+## Code from terraform-provider-docker
+
+`internal/swarm/tfdocker` is adapted from
 [kreuzwerker/terraform-provider-docker](https://github.com/kreuzwerker/terraform-provider-docker)
 under MPL-2.0: the service convergence checker (task-by-slot tracking,
-update/rollback state machine) and the registry auth selection for images.
-The Terraform SDK dependencies were removed; the logic is unchanged. Those
-files keep the MPL-2.0 header (see `NOTICE`).
+update/rollback state machine, numbered task states) and the registry auth
+selection and Docker Hub hostname helpers. The Terraform SDK was removed;
+the logic is unchanged. The files keep their MPL-2.0 headers (see `NOTICE`).
 
-## Import mode
+## Limitations
 
-`flux4swarm import` connects to a Swarm manager and writes:
-
-```
-<repo>/
-└── clusters/<cluster>/
-    ├── flux-system/
-    │   └── gotk-sync.yaml       # GitRepository + Kustomization (with --bootstrap)
-    └── swarm/
-        ├── networks/<name>.yaml
-        ├── configs/<name>.yaml
-        ├── secrets/
-        │   ├── secret-store.yaml    # SecretStore template for --secret-store-provider
-        │   └── <name>.yaml          # ExternalSecret, remoteRef.key = secret name
-        └── services/<name>.yaml
-```
-
-* Runtime fields (IDs, versions, timestamps, `UpdateStatus`, endpoint VIPs)
-  are dropped, network IDs are turned into names, and config/secret IDs are
-  removed.
-* Config data is exported. Secret values cannot be read from the Docker API,
-  so the user has to put them in the secret store under the key written in
-  the ExternalSecret (`--secret-key-prefix` controls the remote key).
-* Services from `docker stack deploy` keep their `com.docker.stack.*`
-  labels and names.
-* `--adopt` adds the ownership labels to the exported manifests so that the
-  first reconcile adopts the existing objects instead of leaving them alone.
-* Output goes to a local directory (`--output`) or straight to Git
-  (`--git-url`, `--branch`, credentials as for GitRepository). Both
-  `https://github.com/<org>/<repo>` and
-  `https://dev.azure.com/<org>/<project>/_git/<repo>` work.
-
-## Status and operations
-
-Flux writes status into the custom resources. flux4swarm serves it over HTTP
-(`--listen`, default `:9797`): `/healthz`, `/readyz`, `/status` (JSON list of
-objects with their Ready condition, revision and inventory, similar to
-`flux get all`) and `/metrics` (Prometheus text format with
-`gotk_reconcile_condition` and `gotk_reconcile_duration_seconds`).
-`POST /reconcile` triggers an immediate reconcile, like
-`flux reconcile --with-source`.
-
-## Limitations and design choices
-
-* Only one controller replica should run, on a manager node, with the Docker
-  socket mounted. There is no leader election.
-* Kustomize overlays, patches and generators, Helm, OCI and Bucket sources,
-  notifications and image automation are not implemented.
-* Where Flux behaviour could not be copied, the most Flux-like choice was
-  taken: API groups and field names match Flux and ESO, the labels match
-  kustomize-controller, and Kubernetes secret references map to Docker
-  secrets.
+* Run one controller replica on a manager; there is no leader election.
+* Helm, OCI and Bucket sources, notifications, image automation and SOPS are
+  not implemented.
+* Kubernetes features without a Swarm counterpart (multi-container pods,
+  ClusterIP port remapping, HPA, RBAC, NetworkPolicy, Ingress) are rejected
+  or ignored as described above.
