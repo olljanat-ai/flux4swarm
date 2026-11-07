@@ -93,3 +93,82 @@ Swarm has no traffic shifting, but it can roll back a failed update.
    `flux4swarm diff --strict` in CI) to see what Swarm does not run.
 6. When a namespace has moved, delete it from the Swarm overlay; prune
    removes its services from Swarm.
+
+## Keep Kubernetes in sync with a live Swarm
+
+The layout above moves Swarm under GitOps. If the development teams should
+keep deploying to Swarm the way they do today (`docker stack deploy`,
+`docker service update`, their CI pipelines) while a platform team builds
+the Kubernetes environment, turn it around: Swarm stays the source of
+truth, and `flux4swarm import --watch` commits every change to Git, where
+stock Flux applies it to Kubernetes.
+
+```sh
+flux4swarm import --watch --cluster prod --bootstrap \
+  --git-url https://github.com/acme/fleet --branch main
+```
+
+Do not run the flux4swarm controller on the same path at the same time:
+then both Git and Swarm would claim to be the source of truth.
+
+### Who owns which file
+
+```
+clusters/prod/
+  flux-system/            # created once by --bootstrap, then yours (flux bootstrap may rewrite it)
+  apps/                   # owned by import --watch: regenerated on every Swarm change, do not edit
+  platform/               # owned by the platform team: Kubernetes-only objects
+  kustomization.yaml      # owned by the platform team: ties it together and patches apps/
+```
+
+Every export empties `apps/` and writes it again, so a manual edit there is
+gone with the next Swarm change (or the next `--interval` resync). Anything
+outside `apps/` is never overwritten: the exporter only creates a missing
+bootstrap file. This is plain kustomize, so it works the same in Flux and
+in `kubectl kustomize`:
+
+```yaml
+# clusters/prod/kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - flux-system
+  - apps        # what runs on Swarm right now
+  - platform    # HPAs, PodDisruptionBudgets, NetworkPolicies, HelmReleases, ...
+patches:
+  # Changes to exported objects. Select them with a target, so a patch
+  # whose workload is later removed from Swarm matches nothing instead of
+  # failing the build.
+  - target:
+      kind: Deployment
+      name: api
+      namespace: shop
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/readinessProbe
+        value:
+          httpGet: {path: /healthz, port: 8080}
+  # An HPA owns the replica count on Kubernetes; drop the one Swarm runs.
+  - target:
+      kind: Deployment
+      name: api
+      namespace: shop
+    patch: |-
+      - op: remove
+        path: /spec/replicas
+```
+
+Without a root `kustomization.yaml` Flux generates one from the
+directories, so plain additions in `platform/` (with its own
+`kustomization.yaml`) work too; the root file is only needed for patches.
+If you prefer, the same `patches` can go into the `spec.patches` of the
+Flux `Kustomization` in `flux-system/gotk-sync.yaml` instead.
+
+### Moving a workload over
+
+When a workload should run only on Kubernetes, copy its manifests from
+`apps/` into `platform/` (or another directory you own) and remove the
+service from Swarm, or keep it on Swarm and `--exclude` it from the export.
+The next export drops it from `apps/`, and Flux keeps the copy you own.
+When everything has moved, stop `import --watch`; the repository is then an
+ordinary Flux repository.

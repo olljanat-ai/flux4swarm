@@ -26,6 +26,7 @@ complete mapping.
 | Mode | Command | Use it to |
 |------|---------|-----------|
 | **Import** | `flux4swarm import` | Export services, configs, secrets (as ExternalSecrets), volumes and Traefik routes (as Gateway API HTTPRoutes) from a running Swarm to a directory or straight to a GitHub / Azure DevOps repository. |
+| **Continuous import** | `flux4swarm import --watch` | Keep the Swarm as the source of truth (teams keep using `docker stack deploy`) and commit every change to Git, so Flux keeps a Kubernetes cluster in sync while the platform team adds Kubernetes-only features on top. |
 | **GitOps** | `flux4swarm controller` (loop) / `flux4swarm reconcile` (one pass) | Pull the repository, build it like Flux's kustomize-controller, apply it to Swarm, prune what was removed and wait for services to converge. |
 
 A typical migration: import once with `--bootstrap`, review the commit,
@@ -119,6 +120,25 @@ left for the first reconcile, because their new secret versions are created
 from the secret store. Import prints every Swarm object it did not export
 (`skipped: Service/tmp_debug (matches --exclude)`), so nothing is dropped
 silently.
+
+### Keep exporting (Swarm stays the source of truth)
+
+`import --watch` keeps running: it exports again after every Swarm service,
+config or secret event (after `--debounce`, default 5s, so one `docker stack
+deploy` gives one commit) and every `--interval` (default 10m), and commits
+only when the export differs. Swarm is never changed (`--adopt` is refused).
+The export owns `clusters/<cluster>/apps/` and rewrites it every time; files
+anywhere else, such as `flux-system/` or the platform team's overlays and
+patches, are created once when missing and then left alone. That is how
+Kubernetes-only features are added on top, see
+[docs/kubernetes-and-swarm.md](docs/kubernetes-and-swarm.md#keep-kubernetes-in-sync-with-a-live-swarm).
+
+```sh
+flux4swarm import --watch --cluster prod --bootstrap --git-url https://github.com/acme/fleet
+```
+
+To run it as a Swarm service see
+[deploy/flux4swarm-export-stack.yaml](deploy/flux4swarm-export-stack.yaml).
 
 ### Services outside a stack
 
