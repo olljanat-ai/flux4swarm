@@ -33,12 +33,30 @@ repository (`flux bootstrap` adds `gotk-components.yaml`).
 
 ## Install
 
+Releases publish binaries for Linux, macOS and Windows (amd64, arm64) on the
+[releases page](https://github.com/olljanat-ai/flux4swarm/releases) and
+multi-arch images (linux/amd64, linux/arm64) to
+`ghcr.io/olljanat-ai/flux4swarm` (tags `X.Y.Z`, `X.Y` and `latest`). Each
+release has SPDX SBOMs and keyless [cosign](https://github.com/sigstore/cosign)
+signatures for the checksums file and the images:
+
+```sh
+cosign verify ghcr.io/olljanat-ai/flux4swarm:latest \
+  --certificate-identity-regexp 'https://github.com/olljanat-ai/flux4swarm/.github/workflows/release.yml@refs/tags/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Or build from source:
+
 ```sh
 go install github.com/olljanat-ai/flux4swarm/cmd/flux4swarm@latest
 # or
 make build          # bin/flux4swarm
 docker build -t flux4swarm .
 ```
+
+`flux4swarm version` prints the version, commit and build date.
+To cut a release, push a `vX.Y.Z` tag; the release workflow runs GoReleaser.
 
 flux4swarm talks to the Docker Engine API of a Swarm **manager** and honours
 `DOCKER_HOST`, `DOCKER_TLS_VERIFY` and `DOCKER_CERT_PATH`.

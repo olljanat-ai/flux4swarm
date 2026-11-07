@@ -1,0 +1,111 @@
+# GoReleaser configuration for flux4swarm releases.
+# Run locally with: goreleaser release --snapshot --clean --skip=sign,publish
+version: 2
+
+project_name: flux4swarm
+
+before:
+  hooks:
+    - go mod tidy -diff
+
+builds:
+  - id: flux4swarm
+    main: ./cmd/flux4swarm
+    binary: flux4swarm
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .FullCommit }} -X main.date={{ .CommitDate }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: flux4swarm
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+      - LICENSES/*
+      - deploy/*
+
+checksum:
+  name_template: checksums.txt
+
+# SPDX SBOMs for every archive (needs syft on PATH).
+sboms:
+  - artifacts: archive
+
+# Keyless cosign signature for the checksums file, which covers every
+# archive and SBOM. Verify with:
+#   cosign verify-blob --bundle checksums.txt.sigstore.json \
+#     --certificate-identity-regexp 'https://github.com/olljanat-ai/flux4swarm/.github/workflows/release.yml@refs/tags/.*' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - --bundle=${signature}
+      - ${artifact}
+      - --yes
+    artifacts: checksum
+
+# Multi-arch images on GHCR (linux/amd64, linux/arm64) built from the
+# release binaries with buildx, with an SBOM attestation.
+dockers_v2:
+  - id: flux4swarm
+    ids: [flux4swarm]
+    dockerfile: release.Dockerfile
+    images:
+      - ghcr.io/olljanat-ai/flux4swarm
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .Prerelease }}{{ .Major }}.{{ .Minor }}{{ end }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    sbom: true
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.description: Flux compatible GitOps controller for Docker Swarm
+      org.opencontainers.image.source: "{{ .GitURL }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .CommitDate }}"
+      org.opencontainers.image.licenses: Apache-2.0
+
+# Keyless cosign signatures for the pushed images (the default artifacts
+# selection signs what dockers_v2 built). Verify with:
+#   cosign verify ghcr.io/olljanat-ai/flux4swarm:<version> \
+#     --certificate-identity-regexp 'https://github.com/olljanat-ai/flux4swarm/.github/workflows/release.yml@refs/tags/.*' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+docker_signs:
+  - cmd: cosign
+    args:
+      - sign
+      - ${artifact}@${digest}
+      - --yes
+
+release:
+  github:
+    owner: olljanat-ai
+    name: flux4swarm
+  prerelease: auto
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
