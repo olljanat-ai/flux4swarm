@@ -66,13 +66,18 @@ Swarm has no traffic shifting, but it can roll back a failed update.
 ## Repository layout for a migration
 
 1. `flux4swarm import --bootstrap` writes the Swarm into
-   `clusters/<name>/` and the controller reconciles it.
+   `clusters/<name>/` and the controller reconciles it. With one Swarm per
+   environment, import each into its own `clusters/<env>/` and run
+   `flux4swarm merge` (see
+   [Several environments](#several-environments-one-shared-base)): the
+   shared manifests go to `apps/base/` and each `clusters/<env>/apps/`
+   keeps only that environment's differences.
 2. Point Flux on Kubernetes at the same repository. Flux ignores the
    `swarm.flux4swarm.io/*` annotations, so the imported manifests apply as
    they are (Kubernetes needs External Secrets Operator for the
    ExternalSecrets).
-3. Move the shared manifests into a base and give each environment an
-   overlay:
+3. Move the shared manifests into a base and give Swarm and Kubernetes
+   each an overlay (after `merge`, `apps/base/` already is that base):
 
    ```
    apps/

@@ -32,7 +32,11 @@ complete mapping.
 
 A typical migration: import once with `--bootstrap`, review the commit,
 start the controller on the Swarm, and point Flux on Kubernetes at the same
-repository (`flux bootstrap` adds `gotk-components.yaml`). Kubernetes-only
+repository (`flux bootstrap` adds `gotk-components.yaml`). With several
+Swarms (development, acceptance, production), import each into its own
+`clusters/<env>` and run `flux4swarm merge` before reviewing, so the shared
+manifests live once in `apps/base` and each environment only keeps its
+differences (see [Several Swarms](#several-swarms-shared-base-and-per-environment-overlays)). Kubernetes-only
 features (sidecars, httpGet probes, autoscalers, canaries, HelmReleases, ...)
 never fail the Swarm side: they are skipped with a warning, so new
 Kubernetes work can start while Swarm is still live. See
