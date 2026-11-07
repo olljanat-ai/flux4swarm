@@ -9,8 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	gogit "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 func TestPushAndFetch(t *testing.T) {
@@ -64,5 +67,64 @@ func TestPushAndFetch(t *testing.T) {
 	}
 	if art2.Commit != second.Commit {
 		t.Fatalf("got %s want %s", art2.Commit, second.Commit)
+	}
+}
+
+func TestFetchSemVer(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	repo, err := gogit.PlainInit(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := func(content string) plumbing.Hash {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "a.yaml"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := wt.Add("a.yaml"); err != nil {
+			t.Fatal(err)
+		}
+		h, err := wt.Commit(content, &gogit.CommitOptions{Author: &object.Signature{Name: "t", Email: "t@example.invalid", When: time.Now()}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	tag := func(name string, h plumbing.Hash, annotated bool) {
+		t.Helper()
+		var opts *gogit.CreateTagOptions
+		if annotated {
+			opts = &gogit.CreateTagOptions{Message: name, Tagger: &object.Signature{Name: "t", Email: "t@example.invalid", When: time.Now()}}
+		}
+		if _, err := repo.CreateTag(name, h, opts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tag("v1.0.0", commit("one"), false)
+	v11 := commit("one.one")
+	tag("v1.1.0", v11, true)
+	tag("v2.0.0", commit("two"), false)
+	tag("not-a-version", commit("head"), false)
+
+	f := &Fetcher{URL: "file://" + dir, Ref: Ref{SemVer: ">=1.0.0 <2.0.0"}, Dir: t.TempDir()}
+	art, err := f.Fetch(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "v1.1.0@sha1:" + v11.String(); art.Revision != want || art.Commit != v11.String() {
+		t.Fatalf("revision %s, want %s", art.Revision, want)
+	}
+	if b, _ := os.ReadFile(filepath.Join(art.Dir, "a.yaml")); string(b) != "one.one" {
+		t.Fatalf("content %q", b)
+	}
+
+	f = &Fetcher{URL: "file://" + dir, Ref: Ref{SemVer: ">=3.0.0"}, Dir: t.TempDir()}
+	if _, err := f.Fetch(ctx, nil); err == nil || !strings.Contains(err.Error(), "no tag matches") {
+		t.Fatalf("want no-match error, got %v", err)
 	}
 }

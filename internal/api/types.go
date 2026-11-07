@@ -20,6 +20,7 @@ const (
 	ESOGroupVersionBeta   = "external-secrets.io/v1beta1"
 
 	KindGitRepository      = "GitRepository"
+	KindOCIRepository      = "OCIRepository"
 	KindKustomization      = "Kustomization"
 	KindExternalSecret     = "ExternalSecret"
 	KindSecretStore        = "SecretStore"
@@ -141,6 +142,45 @@ type GitRepositoryRef struct {
 	SemVer string `json:"semver,omitempty"`
 	Name   string `json:"name,omitempty"`
 	Commit string `json:"commit,omitempty"`
+}
+
+// OCIRepository is a Flux OCI artifact source (`flux push artifact`).
+type OCIRepository struct {
+	TypeMeta `json:",inline"`
+	Metadata ObjectMeta        `json:"metadata"`
+	Spec     OCIRepositorySpec `json:"spec"`
+}
+
+// OCIRepositorySpec mirrors Flux's OCIRepositorySpec.
+type OCIRepositorySpec struct {
+	// URL is oci://<host>/<repository>.
+	URL           string                `json:"url"`
+	Ref           *OCIRepositoryRef     `json:"ref,omitempty"`
+	LayerSelector *OCILayerSelector     `json:"layerSelector,omitempty"`
+	Provider      string                `json:"provider,omitempty"`
+	SecretRef     *LocalObjectReference `json:"secretRef,omitempty"`
+	CertSecretRef *LocalObjectReference `json:"certSecretRef,omitempty"`
+	Verify        *json.RawMessage      `json:"verify,omitempty"`
+	Interval      Duration              `json:"interval"`
+	Timeout       *Duration             `json:"timeout,omitempty"`
+	Insecure      bool                  `json:"insecure,omitempty"`
+	Suspend       bool                  `json:"suspend,omitempty"`
+}
+
+// OCIRepositoryRef selects the artifact. Precedence: Digest, SemVer, Tag;
+// without any of them the tag "latest" is used.
+type OCIRepositoryRef struct {
+	Digest       string `json:"digest,omitempty"`
+	SemVer       string `json:"semver,omitempty"`
+	SemverFilter string `json:"semverFilter,omitempty"`
+	Tag          string `json:"tag,omitempty"`
+}
+
+// OCILayerSelector picks the layer that holds the manifests.
+type OCILayerSelector struct {
+	MediaType string `json:"mediaType,omitempty"`
+	// Operation is extract (default) or copy.
+	Operation string `json:"operation,omitempty"`
 }
 
 // ---- kustomize.toolkit.fluxcd.io/v1 ----

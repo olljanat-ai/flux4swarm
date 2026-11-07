@@ -23,6 +23,7 @@ const (
 	ReasonBuildFailed         = "BuildFailed"
 	ReasonHealthCheckFailed   = "HealthCheckFailed"
 	ReasonGitOperationFailed  = "GitOperationFailed"
+	ReasonOCIPullFailed       = "OCIArtifactPullFailed"
 	ReasonSuspended           = "Suspended"
 	ReasonSecretResolveFailed = "ExternalSecretFailed"
 )

@@ -18,27 +18,25 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/storage/memory"
+
+	"github.com/olljanat-ai/flux4swarm/internal/source"
 )
 
-// Ref selects what to check out. At most one of Branch, Tag, Name and
-// Commit should be set; Commit may be combined with Branch.
+// Ref selects what to check out. At most one of Branch, Tag, SemVer, Name
+// and Commit should be set; Commit may be combined with Branch. Like Flux,
+// the precedence is Commit, Name, SemVer, Tag, Branch.
 type Ref struct {
 	Branch string
 	Tag    string
+	// SemVer selects the highest tag that satisfies the constraint.
+	SemVer string
 	Name   string
 	Commit string
 }
 
-// Artifact is a checked-out revision.
-type Artifact struct {
-	// Dir is the worktree root.
-	Dir string
-	// Revision uses the Flux format: "<branch>@sha1:<hash>",
-	// "<tag>@sha1:<hash>" or "sha1:<hash>".
-	Revision  string
-	Commit    string
-	FetchedAt time.Time
-}
+// Artifact is a checked-out revision. Revision uses the Flux format:
+// "<branch>@sha1:<hash>", "<tag>@sha1:<hash>" or "sha1:<hash>".
+type Artifact = source.Artifact
 
 // Fetcher keeps one checkout per source in a cache directory.
 type Fetcher struct {
@@ -75,11 +73,25 @@ func (f *Fetcher) RemoteHead(ctx context.Context) (string, string, error) {
 	if err != nil {
 		return "", "", fmt.Errorf("list %s: %w", redact(f.URL), err)
 	}
-	want, short := f.Ref.refName()
 	byName := map[plumbing.ReferenceName]*plumbing.Reference{}
 	for _, r := range refs {
 		byName[r.Name()] = r
 	}
+	ref := f.Ref
+	if ref.SemVer != "" && ref.Name == "" {
+		var tags []string
+		for _, r := range refs {
+			if r.Name().IsTag() && !strings.HasSuffix(r.Name().String(), "^{}") {
+				tags = append(tags, r.Name().Short())
+			}
+		}
+		tag, err := source.LatestVersion(tags, ref.SemVer, "")
+		if err != nil {
+			return "", "", fmt.Errorf("%s: %w", redact(f.URL), err)
+		}
+		ref.Tag = tag
+	}
+	want, short := ref.refName()
 	if want == plumbing.HEAD {
 		h := byName[plumbing.HEAD]
 		if h == nil {
@@ -132,7 +144,12 @@ func (f *Fetcher) Fetch(ctx context.Context, last *Artifact) (*Artifact, error) 
 		return nil, err
 	}
 	opts := &gogit.CloneOptions{URL: f.URL, Auth: auth, Tags: gogit.NoTags}
-	ref, _ := f.Ref.refName()
+	// A semver ref was resolved to the tag short by RemoteHead.
+	resolved := f.Ref
+	if resolved.SemVer != "" && resolved.Name == "" {
+		resolved.Tag = short
+	}
+	ref, _ := resolved.refName()
 	if f.Ref.Commit == "" {
 		opts.Depth = 1
 		opts.SingleBranch = true

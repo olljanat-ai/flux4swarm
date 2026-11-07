@@ -7,6 +7,13 @@ E2E_DIND_PORT="${E2E_DIND_PORT:-23750}"
 # daemon so the tests never depend on registry access from inside DinD.
 E2E_IMAGES="${E2E_IMAGES:-nginx:alpine nginx:stable-alpine}"
 E2E_STATE_DIR="${E2E_STATE_DIR:-${TMPDIR:-/tmp}/flux4swarm-e2e}"
+# OCI registry (distribution) for OCIRepository tests, on the outer daemon:
+#   http://127.0.0.1:$E2E_REGISTRY_PORT       (from the host: flux push, flux4swarm)
+#   http://$E2E_REGISTRY_NAME:5000            (from kind pods, once k8s-up.sh
+#                                              joins it to the kind network)
+E2E_REGISTRY_NAME="${E2E_REGISTRY_NAME:-flux4swarm-e2e-registry}"
+E2E_REGISTRY_IMAGE="${E2E_REGISTRY_IMAGE:-registry:3}"
+E2E_REGISTRY_PORT="${E2E_REGISTRY_PORT:-23781}"
 
 # The docker daemon the swarm runs in.
 swarm_docker() {

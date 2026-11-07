@@ -11,8 +11,9 @@ Swarm and apply to the Docker Engine API".
 ```
  Git (GitHub, Azure DevOps, any)            flux4swarm (one process on a Swarm manager)
  ───────────────────────────────            ───────────────────────────────────────────
- clusters/prod/flux-system/      ──fetch──▶ source reconciler (GitRepository, go-git)
-   gotk-sync.yaml                                │ artifact <branch>@sha1:<commit>
+ clusters/prod/flux-system/      ──fetch──▶ source reconciler (GitRepository: go-git,
+   gotk-sync.yaml                                │  OCIRepository: OCI distribution API)
+                                                 │ artifact <branch>@sha1:<commit>, <tag>@sha256:<digest>
  clusters/prod/apps/<ns>/*.yaml                  ▼
    Deployment, Service, ConfigMap,          kustomization reconciler
    PVC, ExternalSecret, HTTPRoute ...         1. kustomize build (krusty), Flux overlays,
@@ -36,6 +37,8 @@ Swarm and apply to the Docker Engine API".
 | Package | Role |
 |---------|------|
 | `internal/git` | go-git fetch (Flux revision format) and commit/push; auth for PAT, bearer, SSH, GitHub App, Azure Entra ID |
+| `internal/oci` | OCIRepository fetch: Flux artifacts (`flux push artifact`) over the OCI distribution API, basic/bearer auth |
+| `internal/source` | artifact type shared by the fetchers, semver tag selection |
 | `internal/build` | Flux-compatible kustomize build |
 | `internal/api` | Flux and ESO types, decoding of a build into typed Kubernetes objects |
 | `internal/secrets` | ESO providers: `vault`, `azurekv`, `fake` |
@@ -67,7 +70,28 @@ Swarm and apply to the Docker Engine API".
    `kustomize.toolkit.fluxcd.io/reconcile: disabled`, and kinds with no
    Swarm meaning are recorded as ignored.
 
-GitRepository and Kustomization objects found in a build are registered
+## Sources
+
+* **GitRepository**: `spec.ref` `branch`, `tag`, `semver`, `name` and
+  `commit` with Flux's precedence (commit, name, semver, tag, branch).
+  `semver` lists the remote tags and picks the highest one that satisfies
+  the range (Masterminds/semver syntax, the same as Flux), so the revision
+  is `<tag>@sha1:<commit>`.
+* **OCIRepository** (`source.toolkit.fluxcd.io/v1`): artifacts pushed with
+  `flux push artifact`. `spec.ref` `digest`, `semver` (+ `semverFilter`)
+  and `tag` (default `latest`); the revision is `<tag>@sha256:<digest>` (or
+  `sha256:<digest>` for a digest ref), like Flux. The first layer, or the
+  one matching `layerSelector.mediaType`, is extracted (`operation: extract`).
+  Credentials come from `spec.secretRef` (a `.dockerconfigjson` or
+  `username`/`password` in the credentials directory), else from the
+  controller's `--registry-config`; `certSecretRef` (`ca.crt`, `tls.crt`,
+  `tls.key`) and `insecure: true` (plain HTTP) are supported. Not supported:
+  `verify` (cosign/notation), `layerSelector.operation: copy` and the cloud
+  `provider`s (aws, azure, gcp); objects using them are not Ready.
+  Tarballs are checked against their digest, and entries that leave the
+  artifact root, links and special files are rejected.
+
+GitRepository, OCIRepository and Kustomization objects found in a build are registered
 with the controller, which gives the usual self-managing `flux-system`
 setup. They are garbage collected when removed from Git if the parent has
 `prune: true`.
@@ -280,8 +304,8 @@ the logic is unchanged. The files keep their MPL-2.0 headers (see `NOTICE`).
 ## Limitations
 
 * Run one controller replica on a manager; there is no leader election.
-* Helm, OCI and Bucket sources, image automation and SOPS are not
-  implemented. Notification Provider types other than the six listed above
+* Helm and Bucket sources, OCI artifact verification, image automation and
+  SOPS are not implemented. Notification Provider types other than the six listed above
   are reported as not supported.
 * Status lives in memory, so after a restart every Kustomization sends its
   "Reconciliation finished" event again (Git providers skip unchanged
