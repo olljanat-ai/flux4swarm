@@ -35,7 +35,7 @@ func k8sEnv() *k8s {
 		gitRoot:        envOr("E2E_GIT_ROOT", filepath.Join(stateDir(), "git")),
 		hostGitURL:     "http://127.0.0.1:" + envOr("E2E_GIT_PORT", "23780"),
 		clusterGitURL:  "http://" + envOr("E2E_GIT_NAME", "flux4swarm-e2e-git") + ":8080",
-		fluxComponents: envOr("FLUX_COMPONENTS", "source-controller,kustomize-controller"),
+		fluxComponents: envOr("FLUX_COMPONENTS", "source-controller,kustomize-controller,notification-controller"),
 	}
 }
 

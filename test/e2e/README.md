@@ -11,7 +11,8 @@ so one repo can drive both Swarm (flux4swarm) and Kubernetes (Flux2).
   mode. The test images are pulled by your daemon and loaded into DinD
   (`docker save | docker load`), so DinD needs no registry or proxy access.
 - **Kubernetes** (`scripts/k8s-up.sh`): a kind cluster `flux4swarm-e2e` with
-  stock Flux2 (`flux install`, source-controller + kustomize-controller),
+  stock Flux2 (`flux install`, source-controller, kustomize-controller and
+  notification-controller),
   External Secrets Operator (Helm chart), the Gateway API CRDs (standard
   channel) and the Traefik CRDs (no gateway or Traefik controller runs). Every
   image is pulled by your daemon and loaded into the node (`kind load`), so the

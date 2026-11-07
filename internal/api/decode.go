@@ -30,6 +30,11 @@ type Set struct {
 	GitRepositories []*GitRepository
 	Kustomizations  []*Kustomization
 
+	// Flux notification objects.
+	Providers []*Provider
+	Alerts    []*Alert
+	Receivers []*Receiver
+
 	// Kubernetes workloads and their dependencies.
 	Deployments  []*appsv1.Deployment
 	StatefulSets []*appsv1.StatefulSet
@@ -147,6 +152,27 @@ func (s *Set) decodeOne(doc []byte, defNS string) error {
 		}
 		o.Metadata.Namespace = ns
 		s.Kustomizations = append(s.Kustomizations, o)
+	case group == NotificationGroup && h.Kind == KindProvider:
+		o := &Provider{}
+		if err := dec(o); err != nil {
+			return err
+		}
+		o.Metadata.Namespace = ns
+		s.Providers = append(s.Providers, o)
+	case group == NotificationGroup && h.Kind == KindAlert:
+		o := &Alert{}
+		if err := dec(o); err != nil {
+			return err
+		}
+		o.Metadata.Namespace = ns
+		s.Alerts = append(s.Alerts, o)
+	case group == NotificationGroup && h.Kind == KindReceiver:
+		o := &Receiver{}
+		if err := dec(o); err != nil {
+			return err
+		}
+		o.Metadata.Namespace = ns
+		s.Receivers = append(s.Receivers, o)
 	case group == "apps" && version == "v1" && h.Kind == "Deployment":
 		o := &appsv1.Deployment{}
 		if err := dec(o); err != nil {

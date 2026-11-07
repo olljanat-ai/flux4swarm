@@ -4,6 +4,8 @@
 #   docker config create gotk-sync clusters/prod/flux-system/gotk-sync.yaml
 #   docker stack deploy -c deploy/flux4swarm-stack.yaml flux-system
 # The secret names follow the GitRepository secretRef: <secretRef>_<key>.
+# Port 9292 serves Flux Receiver webhooks (/hook/...); publish it to your Git
+# server and keep 9797 (status, POST /reconcile) internal.
 version: "3.8"
 services:
   controller:
@@ -20,6 +22,7 @@ services:
       - flux-system_password
     ports:
       - "9797:9797"
+      - "9292:9292"
     deploy:
       replicas: 1
       placement:

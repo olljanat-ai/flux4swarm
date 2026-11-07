@@ -32,7 +32,7 @@ KIND_VERSION="${KIND_VERSION:-v0.33.0}"
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5}"
 KUBECTL_VERSION="${KUBECTL_VERSION:-v1.37.2}"
 FLUX_VERSION="${FLUX_VERSION:-v2.10.0}"
-FLUX_COMPONENTS="${FLUX_COMPONENTS:-source-controller,kustomize-controller}"
+FLUX_COMPONENTS="${FLUX_COMPONENTS:-source-controller,kustomize-controller,notification-controller}"
 HELM_VERSION="${HELM_VERSION:-v3.22.1}"
 ESO_CHART_VERSION="${ESO_CHART_VERSION:-2.14.0}"
 # The chart tarball from the ESO GitHub release (what charts.external-secrets.io

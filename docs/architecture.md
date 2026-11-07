@@ -28,7 +28,7 @@ Swarm and apply to the Docker Engine API".
 
 | Mode | Command | Flux equivalent |
 |------|---------|-----------------|
-| GitOps | `flux4swarm controller`, `flux4swarm reconcile` (one pass) | source-controller + kustomize-controller |
+| GitOps | `flux4swarm controller`, `flux4swarm reconcile` (one pass) | source-controller + kustomize-controller + notification-controller |
 | Import | `flux4swarm import` | `flux bootstrap` + exporting existing workloads |
 
 ## Packages
@@ -44,7 +44,8 @@ Swarm and apply to the Docker Engine API".
 | `internal/render` | traefik + translate for one build |
 | `internal/swarm` | applier: ownership labels, versioned configs/secrets, drift detection, prune, wait |
 | `internal/swarm/tfdocker` | code derived from terraform-provider-docker (MPL-2.0) |
-| `internal/controller` | reconcile loop, dependency ordering, status and metrics |
+| `internal/controller` | reconcile loop, dependency ordering, status and metrics, events and Receiver webhooks |
+| `internal/notify` | notification-controller: Alert matching, Providers (generic, generic-hmac, Slack, Microsoft Teams, GitHub and Azure DevOps commit status), Receiver validation |
 | `internal/importer` | Swarm → Kubernetes manifests with lossless round trip |
 
 ## Build (kustomize-controller compatible)
@@ -183,6 +184,52 @@ service-spec annotation).
 * **Prune** (`spec.prune`) removes owned services, then unused configs,
   secrets and networks that left the build.
 
+## Notifications (notification-controller compatible)
+
+`Provider`, `Alert` and `Receiver` objects
+(`notification.toolkit.fluxcd.io/v1`, also read as `v1beta3`/`v1beta2`)
+are discovered in builds like `GitRepository` and `Kustomization`, or come
+from `--config`. They are registered as children of the Kustomization that
+applied them and are removed with it when it prunes.
+
+* **Events.** The reconcilers emit Flux-shaped events
+  (`event.toolkit.fluxcd.io/v1` JSON): `source-controller` sends
+  `NewArtifact` and `GitOperationFailed`; `kustomize-controller` sends the
+  applied change set (reason `Progressing`), errors (the Ready reason, for
+  example `BuildFailed`, `HealthCheckFailed`) and, after every successful
+  reconciliation, `Reconciliation finished in ...` with
+  `commit_status: update`. Metadata keys carry the object's API group, as in
+  Flux, and are stripped before delivery.
+* **Dispatch** follows notification-controller: event sources match by
+  kind, namespace (default the Alert's), name or `*` with `matchLabels`,
+  severity, `inclusionList`/`exclusionList`; metadata is merged from
+  `event.toolkit.fluxcd.io/*` annotations, `eventMetadata` and the
+  controller; identical events are suppressed for 5 minutes; commit status
+  updates only go to Git and generic providers, and Git providers only get
+  those and errors. Sends are asynchronous with retries; failures are logged
+  and shown as a warning on the Alert's status. Nothing is sent with
+  `--dry-run`.
+* **Providers.** `generic` posts the event (with `gotk-component` header and
+  the `headers` of the secret), `generic-hmac` adds `X-Signature:
+  sha256=<hmac>`, `slack` and `msteams` use Flux's payloads (Teams uses the
+  legacy MessageCard for `*.webhook.office.com` and Adaptive Cards
+  otherwise), `github` and `azuredevops` set commit statuses on the commit
+  in the revision with context `<kind>/<name>/<id>`, skipping duplicates.
+  Secrets (`address`, `token`, `username`, `password`, `headers`, GitHub App
+  or Entra ID service principal keys), `proxySecretRef` and
+  `certSecretRef` are read from the credentials directory. Swarm has no
+  object UIDs, so the commit status id is derived from the Provider's
+  namespace and name. `commitStatusExpr` (CEL) falls back to the default.
+* **Receivers** are served on `--receiver-listen` (default `:9292`, like
+  notification-controller's webhook-receiver) at
+  `/hook/sha256(token+name+namespace)`, the same path Flux computes, which
+  is also shown as `webhookPath` in `/status`. Requests are validated per
+  type (`generic`, `generic-hmac`, `github`, `gitlab`, `bitbucket`,
+  `harbor`, `dockerhub`, `quay`, `nexus`, `acr`) and `spec.events`; the
+  listed resources (by name, or `*` with `matchLabels`) are reconciled
+  immediately. CEL filters (`resourceFilter`, `resources[].filter`) and the
+  `generic-oidc`, `gcr` and `cdevents` types are reported as not supported.
+
 ## Import
 
 `flux4swarm import` reads services, configs, secrets and networks and writes
@@ -220,8 +267,12 @@ the logic is unchanged. The files keep their MPL-2.0 headers (see `NOTICE`).
 ## Limitations
 
 * Run one controller replica on a manager; there is no leader election.
-* Helm, OCI and Bucket sources, notifications, image automation and SOPS are
-  not implemented.
+* Helm, OCI and Bucket sources, image automation and SOPS are not
+  implemented. Notification Provider types other than the six listed above
+  are reported as not supported.
+* Status lives in memory, so after a restart every Kustomization sends its
+  "Reconciliation finished" event again (Git providers skip unchanged
+  commit statuses).
 * Kubernetes features without a Swarm counterpart (multi-container pods,
   ClusterIP port remapping, HPA, RBAC, NetworkPolicy, Ingress) are rejected
   or ignored as described above.

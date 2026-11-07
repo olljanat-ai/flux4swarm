@@ -153,6 +153,19 @@ func (a *AuthProvider) Method(ctx context.Context) (transport.AuthMethod, error)
 	return nil, nil
 }
 
+// Token returns an access token for the github (GitHub App installation
+// token) or azure (Entra ID service principal) provider, cached until
+// shortly before it expires.
+func (a *AuthProvider) Token(ctx context.Context) (string, error) {
+	switch a.Provider {
+	case ProviderGitHub:
+		return a.cachedToken(ctx, a.githubAppToken)
+	case ProviderAzure:
+		return a.cachedToken(ctx, a.azureToken)
+	}
+	return "", fmt.Errorf("provider %q has no token exchange", a.Provider)
+}
+
 func (a *AuthProvider) cachedToken(ctx context.Context, fetch func(context.Context) (string, time.Time, error)) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

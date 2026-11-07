@@ -21,6 +21,7 @@ import (
 	"github.com/olljanat-ai/flux4swarm/internal/build"
 	"github.com/olljanat-ai/flux4swarm/internal/creds"
 	"github.com/olljanat-ai/flux4swarm/internal/git"
+	"github.com/olljanat-ai/flux4swarm/internal/notify"
 	"github.com/olljanat-ai/flux4swarm/internal/render"
 	"github.com/olljanat-ai/flux4swarm/internal/secrets"
 	"github.com/olljanat-ai/flux4swarm/internal/swarm"
@@ -38,6 +39,11 @@ type Options struct {
 	RegistryAuth map[string]registry.AuthConfig
 	DryRun       bool
 	Log          *slog.Logger
+	// NotifyRateLimit suppresses identical notification events
+	// (notify.DefaultRateLimit when 0, disabled when negative).
+	NotifyRateLimit time.Duration
+	// Instance is the reportingInstance of events (usually the hostname).
+	Instance string
 }
 
 type sourceState struct {
@@ -72,6 +78,13 @@ type Controller struct {
 	clusterStores map[string]*api.SecretStore
 	trigger       chan struct{}
 	ready         bool
+
+	// Flux notification objects, Receiver webhook paths and the dispatcher.
+	notif        map[string]*notifState
+	hooks        map[string]string
+	dispatcher   *notify.Dispatcher
+	notifChecked time.Time
+	instance     string
 }
 
 // New returns a Controller.
@@ -79,13 +92,18 @@ func New(o Options) *Controller {
 	if o.Log == nil {
 		o.Log = slog.Default()
 	}
-	return &Controller{
+	c := &Controller{
 		opts:          o,
 		sources:       map[string]*sourceState{},
 		kustomization: map[string]*ksState{},
 		clusterStores: map[string]*api.SecretStore{},
 		trigger:       make(chan struct{}, 1),
+		notif:         map[string]*notifState{},
+		hooks:         map[string]string{},
+		instance:      o.Instance,
 	}
+	c.dispatcher = &notify.Dispatcher{Creds: o.Creds, Log: o.Log, RateLimit: o.NotifyRateLimit, OnResult: c.onNotifyResult}
+	return c
 }
 
 const bootstrapOrigin = "bootstrap"
@@ -186,6 +204,7 @@ func (c *Controller) Run(ctx context.Context) error {
 		c.mu.Unlock()
 		select {
 		case <-ctx.Done():
+			c.dispatcher.Wait()
 			return nil
 		case <-tick.C:
 		case <-c.trigger:
@@ -204,9 +223,10 @@ func (c *Controller) ReconcileOnce(ctx context.Context) error {
 			break
 		}
 	}
+	c.dispatcher.Wait()
 	var failed []string
 	for _, s := range c.Status() {
-		if !s.Suspended && !s.IsReady() {
+		if !s.Suspended && !s.IsReady() && !isNotificationKind(s.Kind) {
 			failed = append(failed, fmt.Sprintf("%s/%s/%s: %s", s.Kind, s.Namespace, s.Name, s.Ready.Message))
 		}
 	}
@@ -238,6 +258,7 @@ func (c *Controller) allAttempted() bool {
 func (c *Controller) pass(ctx context.Context, force bool) {
 	now := time.Now()
 	c.mu.Lock()
+	c.revalidateNotificationsLocked(force)
 	var srcKeys []string
 	for k, s := range c.sources {
 		if force || !now.Before(s.next) {
@@ -386,10 +407,12 @@ func (c *Controller) reconcileSource(ctx context.Context, key string) {
 	if err != nil {
 		c.opts.Log.Error("fetch failed", "gitrepository", obj.Metadata.NamespacedName(), "error", err)
 		s.status.setReady(ConditionFalse, ReasonGitOperationFailed, err.Error())
+		c.emitSourceLocked(s, notify.SeverityError, ReasonGitOperationFailed, err.Error(), "")
 		return
 	}
 	if last == nil || last.Revision != art.Revision {
 		c.opts.Log.Info("fetched revision", "gitrepository", obj.Metadata.NamespacedName(), "revision", art.Revision)
+		c.emitSourceLocked(s, notify.SeverityInfo, ReasonNewArtifact, "stored artifact for revision '"+art.Revision+"'", art.Revision)
 	}
 	s.artifact = art
 	s.status.Revision = art.Revision
@@ -424,6 +447,7 @@ func (c *Controller) reconcileKustomization(ctx context.Context, key string, onc
 		s.status.setReady(ConditionFalse, reason, err.Error())
 		s.next = time.Now().Add(retry)
 		log.Error("reconciliation failed", "reason", reason, "error", err)
+		c.emitKustomizationFailureLocked(obj, s.status.LastAttemptedRevision, reason, err.Error())
 	}
 	if obj.Spec.Suspend {
 		s.status.setReady(ConditionUnknown, ReasonSuspended, "suspended")
@@ -579,6 +603,23 @@ func (c *Controller) reconcileKustomization(ctx context.Context, key string, onc
 	}
 	s.status.setReady(ConditionTrue, ReasonSucceeded, msg)
 	s.next = time.Now().Add(interval(obj.Spec.Interval.Duration))
+
+	var changeSet []string
+	for _, ch := range changes {
+		if ch.Action != swarm.Unchanged {
+			changeSet = append(changeSet, ch.String())
+		}
+	}
+	if len(changeSet) > 0 {
+		c.emitLocked(ksRef(), obj.Metadata, kustomizeController, notify.SeverityInfo, notify.ReasonProgressing,
+			notify.ActionReconciling, strings.Join(changeSet, "\n"), ksMetadata(art.Revision, false))
+	}
+	// Like kustomize-controller, every successful reconciliation ends with
+	// an event that commit status (and generic) Providers receive.
+	done := fmt.Sprintf("Reconciliation finished in %s, next run in %s",
+		time.Since(start).Round(time.Millisecond), interval(obj.Spec.Interval.Duration))
+	c.emitLocked(ksRef(), obj.Metadata, kustomizeController, notify.SeverityInfo, ReasonSucceeded,
+		notify.ActionReconciled, done, ksMetadata(art.Revision, true))
 }
 
 func deadline(ctx context.Context, fallback time.Duration) time.Time {
@@ -599,6 +640,15 @@ func (c *Controller) registerChildren(ctx context.Context, s *ksState, key strin
 	for _, k := range set.Kustomizations {
 		now[c.upsertKustomization(k, key)] = true
 	}
+	for _, p := range set.Providers {
+		now[c.upsertNotificationLocked(p, key)] = true
+	}
+	for _, r := range set.Receivers {
+		now[c.upsertNotificationLocked(r, key)] = true
+	}
+	for _, a := range set.Alerts {
+		now[c.upsertNotificationLocked(a, key)] = true
+	}
 	var keep []string
 	for _, child := range s.children {
 		if now[child] {
@@ -607,6 +657,10 @@ func (c *Controller) registerChildren(ctx context.Context, s *ksState, key strin
 		if !prune {
 			keep = append(keep, child)
 			continue
+		}
+		if n, ok := c.notif[child]; ok && n.origin == key {
+			c.removeNotificationLocked(child)
+			c.opts.Log.Info("removed notification object", "object", child)
 		}
 		if src, ok := c.sources[child]; ok && src.origin == key {
 			delete(c.sources, child)
@@ -648,6 +702,11 @@ func (c *Controller) Status() []ObjectStatus {
 	for _, k := range c.kustomization {
 		st := k.status
 		st.ManagedBy = k.origin
+		out = append(out, st)
+	}
+	for _, n := range c.notif {
+		st := n.status
+		st.ManagedBy = n.origin
 		out = append(out, st)
 	}
 	sort.Slice(out, func(i, j int) bool {
