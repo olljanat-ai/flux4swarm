@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -220,6 +221,16 @@ type PushOptions struct {
 	// Clean lists worktree-relative directories that are removed before
 	// Write runs, so that objects deleted from Swarm vanish from Git too.
 	Clean []string
+	// Describe, when set, writes the commit message from the files the
+	// commit changes. An empty result falls back to Message.
+	Describe func([]FileChange) string
+}
+
+// FileChange is a file a commit adds, changes or deletes. Old is nil for an
+// added file and New is nil for a deleted one.
+type FileChange struct {
+	Path     string
+	Old, New []byte
 }
 
 // PushResult describes what CommitAndPush did.
@@ -311,7 +322,17 @@ func commitAndPush(ctx context.Context, workDir string, o PushOptions, depth int
 	if o.Email == "" {
 		o.Email = "flux4swarm@users.noreply.github.com"
 	}
-	h, err := wt.Commit(o.Message, &gogit.CommitOptions{
+	msg := o.Message
+	if o.Describe != nil {
+		changes, err := fileChanges(repo, workDir, st)
+		if err != nil {
+			return nil, err
+		}
+		if m := o.Describe(changes); m != "" {
+			msg = m
+		}
+	}
+	h, err := wt.Commit(msg, &gogit.CommitOptions{
 		Author: &object.Signature{Name: o.Author, Email: o.Email, When: time.Now()},
 	})
 	if err != nil {
@@ -326,6 +347,47 @@ func commitAndPush(ctx context.Context, workDir string, o PushOptions, depth int
 		return nil, fmt.Errorf("push %s: %w", redact(o.URL), err)
 	}
 	return &PushResult{Commit: h.String(), Changed: true}, nil
+}
+
+// fileChanges reads the old (HEAD) and new (worktree) content of every
+// file in the status, sorted by path.
+func fileChanges(repo *gogit.Repository, root string, st gogit.Status) ([]FileChange, error) {
+	var tree *object.Tree
+	if head, err := repo.Head(); err == nil {
+		c, err := repo.CommitObject(head.Hash())
+		if err != nil {
+			return nil, err
+		}
+		if tree, err = c.Tree(); err != nil {
+			return nil, err
+		}
+	}
+	var out []FileChange
+	for p := range st {
+		fc := FileChange{Path: p}
+		if tree != nil {
+			if f, err := tree.File(p); err == nil {
+				s, err := f.Contents()
+				if err != nil {
+					return nil, err
+				}
+				fc.Old = []byte(s)
+			}
+		}
+		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(p)))
+		switch {
+		case err == nil:
+			fc.New = b
+		case !errors.Is(err, os.ErrNotExist):
+			return nil, err
+		}
+		if fc.Old == nil && fc.New == nil {
+			continue
+		}
+		out = append(out, fc)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, nil
 }
 
 func isMissingRef(err error) bool {
