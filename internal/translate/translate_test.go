@@ -16,7 +16,7 @@ import (
 func decodeString(t *testing.T, yaml string) *api.Set {
 	t.Helper()
 	set := &api.Set{}
-	if err := set.Decode("test", []byte(yaml), translate.DefaultNamespace); err != nil {
+	if err := set.Decode("test", []byte(yaml), api.SwarmNamespace); err != nil {
 		t.Fatal(err)
 	}
 	return set

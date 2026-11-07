@@ -90,7 +90,7 @@ func decode(t *testing.T, file string) *api.Set {
 		t.Fatal(err)
 	}
 	set := &api.Set{}
-	if err := set.Decode(filepath.Base(file), data, translate.DefaultNamespace); err != nil {
+	if err := set.Decode(filepath.Base(file), data, api.SwarmNamespace); err != nil {
 		t.Fatal(err)
 	}
 	return set
