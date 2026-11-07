@@ -15,6 +15,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"syscall"
@@ -31,7 +33,59 @@ import (
 	"github.com/olljanat-ai/flux4swarm/internal/swarm"
 )
 
-var version = "dev"
+// Set at build time with -ldflags "-X main.version=... -X main.commit=... -X main.date=...".
+var (
+	version = "dev"
+	commit  = ""
+	date    = ""
+)
+
+// versionInfo returns the version, falling back to the module and VCS
+// information Go embeds when the ldflags were not set (go install, go build).
+func versionInfo() (v, c, d string) {
+	v, c, d = version, commit, date
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if v == "dev" && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+			v = bi.Main.Version
+		}
+		for _, s := range bi.Settings {
+			switch {
+			case s.Key == "vcs.revision" && c == "":
+				c = s.Value
+			case s.Key == "vcs.time" && d == "":
+				d = s.Value
+			}
+		}
+	}
+	return v, c, d
+}
+
+func newVersionCmd() *cobra.Command {
+	var short bool
+	cmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print the version",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, _ []string) {
+			v, c, d := versionInfo()
+			out := cmd.OutOrStdout()
+			if short {
+				fmt.Fprintln(out, v)
+				return
+			}
+			fmt.Fprintf(out, "version: %s\n", v)
+			if c != "" {
+				fmt.Fprintf(out, "commit:  %s\n", c)
+			}
+			if d != "" {
+				fmt.Fprintf(out, "date:    %s\n", d)
+			}
+			fmt.Fprintf(out, "go:      %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
+		},
+	}
+	cmd.Flags().BoolVar(&short, "short", false, "print only the version")
+	return cmd
+}
 
 func main() {
 	if err := newRoot().Execute(); err != nil {
@@ -58,11 +112,7 @@ func newRoot() *cobra.Command {
 	}
 	root.PersistentFlags().StringVar(&g.logLevel, "log-level", "info", "debug, info, warn or error")
 	root.PersistentFlags().StringVar(&g.logFormat, "log-format", "text", "text or json")
-	root.AddCommand(newControllerCmd(false), newControllerCmd(true), newImportCmd(), &cobra.Command{
-		Use:   "version",
-		Short: "Print the version",
-		Run:   func(*cobra.Command, []string) { fmt.Println(version) },
-	})
+	root.AddCommand(newControllerCmd(false), newControllerCmd(true), newImportCmd(), newVersionCmd())
 	return root
 }
 
@@ -205,7 +255,7 @@ func newControllerCmd(once bool) *cobra.Command {
 				slog.Error("status server", "error", err)
 			}
 		}()
-		slog.Info("controller started", "version", version, "listen", listen)
+		slog.Info("controller started", "version", version, "commit", commit, "listen", listen)
 		err = c.Run(ctx)
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
