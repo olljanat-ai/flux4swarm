@@ -572,7 +572,7 @@ func newImportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.SecretStoreProvider, "secret-store-provider", importer.ProviderVault, "template for the SecretStore: vault, azurekv or fake")
 	cmd.Flags().StringVar(&o.SecretKeyPrefix, "secret-key-prefix", "", "prefix for remoteRef.key")
 	cmd.Flags().StringVar(&exclude, "exclude", "", "regular expression of Swarm object names to skip")
-	cmd.Flags().StringVar(&message, "commit-message", "", "commit message")
+	cmd.Flags().StringVar(&message, "commit-message", "", "commit message (default: one written from what changed, such as \"shop: api image 1.4→1.5, removed tmp-debug\")")
 	cmd.Flags().StringVar(&author, "author", "flux4swarm", "commit author name")
 	cmd.Flags().StringVar(&email, "author-email", "flux4swarm@users.noreply.github.com", "commit author email")
 	cmd.Flags().StringVar(&credsDir, "credentials-dir", creds.DefaultDir, "directory with the --git-secret credentials")
@@ -621,12 +621,15 @@ func newImportCmd() *cobra.Command {
 				fmt.Printf("wrote %d files to %s\n", len(res.Files), filepath.Join(output, res.Root))
 				return res, nil
 			}
+			verb := "Import"
+			if watch {
+				verb = "Sync"
+			}
 			msg := message
+			var describe func([]git.FileChange) string
 			if msg == "" {
-				msg = "Import Docker Swarm state into " + res.Root
-				if watch {
-					msg = "Sync Docker Swarm state into " + res.Root
-				}
+				msg = verb + " Docker Swarm state into " + res.Root
+				describe = func(changes []git.FileChange) string { return importer.CommitMessage(verb, changes) }
 			}
 			work, err := os.MkdirTemp("", "flux4swarm-import-")
 			if err != nil {
@@ -634,7 +637,7 @@ func newImportCmd() *cobra.Command {
 			}
 			defer os.RemoveAll(work)
 			pr, err := git.CommitAndPush(ctx, filepath.Join(work, "repo"), git.PushOptions{
-				URL: gf.url, Branch: gf.branch, Message: msg, Author: author, Email: email,
+				URL: gf.url, Branch: gf.branch, Message: msg, Describe: describe, Author: author, Email: email,
 				Auth:  &git.AuthProvider{Provider: gf.provider, URL: gf.url, Secret: secret},
 				Write: func(root string) error { return res.WriteTo(root, watch) },
 			})

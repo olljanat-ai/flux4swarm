@@ -138,6 +138,13 @@ patches, are created once when missing and then left alone. That is how
 Kubernetes-only features are added on top, see
 [docs/kubernetes-and-swarm.md](docs/kubernetes-and-swarm.md#keep-kubernetes-in-sync-with-a-live-swarm).
 
+Each commit message says what changed, grouped by namespace, so the Git
+history reads as an audit log of the Swarm, for example
+`shop: api image 1.4→1.5, removed tmp-debug`. When the list is too long for
+one line the subject counts the changes (`Sync Docker Swarm state: 12
+changes in shop, web`) and the body lists them. `--commit-message` sets a
+fixed message instead.
+
 ```sh
 flux4swarm import --watch --cluster prod --bootstrap --git-url https://github.com/acme/fleet
 ```

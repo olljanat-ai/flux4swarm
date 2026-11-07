@@ -128,3 +128,57 @@ func TestFetchSemVer(t *testing.T) {
 		t.Fatalf("want no-match error, got %v", err)
 	}
 }
+
+func TestPushDescribe(t *testing.T) {
+	ctx := context.Background()
+	bare := filepath.Join(t.TempDir(), "repo.git")
+	if _, err := gogit.PlainInit(bare, true); err != nil {
+		t.Fatal(err)
+	}
+	url := "file://" + bare
+	var got []FileChange
+	push := func(write func(root string) error) string {
+		t.Helper()
+		r, err := CommitAndPush(ctx, filepath.Join(t.TempDir(), "w"), PushOptions{
+			URL: url, Message: "fallback", Write: write,
+			Describe: func(c []FileChange) string {
+				got = c
+				if len(c) == 1 {
+					return ""
+				}
+				return "described"
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		repo, _ := gogit.PlainOpen(bare)
+		c, err := repo.CommitObject(plumbing.NewHash(r.Commit))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.Message
+	}
+	file := func(name, content string) func(string) error {
+		return func(root string) error { return os.WriteFile(filepath.Join(root, name), []byte(content), 0o644) }
+	}
+	if m := push(file("a.yaml", "one")); m != "fallback" {
+		t.Fatalf("empty Describe should fall back to Message, got %q", m)
+	}
+	if len(got) != 1 || got[0].Path != "a.yaml" || got[0].Old != nil || string(got[0].New) != "one" {
+		t.Fatalf("added file: %+v", got)
+	}
+	m := push(func(root string) error {
+		if err := os.Remove(filepath.Join(root, "a.yaml")); err != nil {
+			return err
+		}
+		return file("b.yaml", "two")(root)
+	})
+	if m != "described" {
+		t.Fatalf("message %q", m)
+	}
+	if len(got) != 2 || got[0].Path != "a.yaml" || string(got[0].Old) != "one" || got[0].New != nil ||
+		got[1].Path != "b.yaml" || got[1].Old != nil || string(got[1].New) != "two" {
+		t.Fatalf("changes: %+v", got)
+	}
+}
