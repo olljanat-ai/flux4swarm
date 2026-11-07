@@ -1,15 +1,10 @@
 name: ci
 
 on:
-  # Documentation-only changes do not need a build or the e2e run.
-  push:
-    branches: [main]
-    paths-ignore:
-      - "**.md"
-      - "docs/**"
-      - "LICENSE"
-      - "LICENSES/**"
-      - "NOTICE"
+  # Runs on pull requests only: a merge to main does not start another run,
+  # because the PR already ran on the same code. Use workflow_dispatch to run
+  # it on main by hand. Documentation-only changes do not need a build or the
+  # e2e run.
   pull_request:
     paths-ignore:
       - "**.md"
@@ -17,6 +12,7 @@ on:
       - "LICENSE"
       - "LICENSES/**"
       - "NOTICE"
+  workflow_dispatch:
 
 permissions:
   contents: read
