@@ -30,7 +30,7 @@ func TestExportReportsSkipped(t *testing.T) {
 	want := map[Skipped]bool{
 		{Kind: "Service", Name: "tmp_debug", Reason: SkippedExcluded}:   true,
 		{Kind: "Config", Name: "app-0123456789", Reason: SkippedUnused}: true,
-		{Kind: "Secret", Name: "tmp_token", Reason: SkippedExcluded}:   true,
+		{Kind: "Secret", Name: "tmp_token", Reason: SkippedExcluded}:    true,
 	}
 	for _, s := range res.Skipped {
 		if !want[s] {
