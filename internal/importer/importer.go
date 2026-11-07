@@ -85,6 +85,58 @@ type Options struct {
 	SecretKeyPrefix string
 	// Exclude skips objects whose Swarm name matches.
 	Exclude *regexp.Regexp
+	// SecretEnvNames adds patterns to DefaultSecretEnvNames. An env var
+	// whose name contains a pattern (case-insensitive) is exported as an
+	// ExternalSecret reference instead of a plain value.
+	SecretEnvNames []string
+	// NoDefaultSecretEnvNames drops DefaultSecretEnvNames, so only
+	// SecretEnvNames are used; with none, all env values are exported as is.
+	NoDefaultSecretEnvNames bool
+}
+
+// DefaultSecretEnvNames are the well-known env var name parts that hold
+// secrets. An env var whose name contains one (case-insensitive) is
+// exported as an ExternalSecret reference, so its value stays out of Git.
+var DefaultSecretEnvNames = []string{
+	"PASSWORD", "PASSWD", "SECRET", "TOKEN", "API_KEY", "APIKEY",
+	"ACCESS_KEY", "PRIVATE_KEY", "CREDENTIAL", "CONNECTION_STRING", "CONNECTIONSTRING",
+}
+
+// secretEnvNotSuffixes are name endings that point at a secret instead of
+// holding it (MYSQL_PASSWORD_FILE=/run/secrets/db), so they stay plain.
+var secretEnvNotSuffixes = []string{"_FILE", "_PATH", "_DIR"}
+
+// secretEnvPatterns returns the effective, upper-cased pattern list.
+func (o Options) secretEnvPatterns() []string {
+	var out []string
+	if !o.NoDefaultSecretEnvNames {
+		out = append(out, DefaultSecretEnvNames...)
+	}
+	for _, p := range o.SecretEnvNames {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, strings.ToUpper(p))
+		}
+	}
+	return out
+}
+
+// isSecretEnv reports whether env var name/value should go to the secret store.
+func isSecretEnv(patterns []string, name, value string) bool {
+	if value == "" || strings.Contains(value, "{{") {
+		return false
+	}
+	n := strings.ToUpper(name)
+	for _, s := range secretEnvNotSuffixes {
+		if strings.HasSuffix(n, s) {
+			return false
+		}
+	}
+	for _, p := range patterns {
+		if strings.Contains(n, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // Result is the set of files to write, keyed by slash-separated path
@@ -191,6 +243,7 @@ type exporter struct {
 	cms                         map[string]*corev1.ConfigMap
 	extSecrets                  map[string]*api.ExternalSecret // ns/name
 	placeholders                []*corev1.Secret
+	secretEnv                   []string
 	pvcs                        map[string]*corev1.PersistentVolumeClaim
 	services                    []reportService
 	entryPoints, tlsEntryPoints []string
@@ -213,6 +266,7 @@ func Export(ctx context.Context, c Client, o Options) (*Result, error) {
 		cmKeys:     map[string]string{},
 		cms:        map[string]*corev1.ConfigMap{},
 		extSecrets: map[string]*api.ExternalSecret{},
+		secretEnv:  o.secretEnvPatterns(),
 		pvcs:       map[string]*corev1.PersistentVolumeClaim{},
 	}
 	e.res.Clean = []string{o.Path + "/" + AppsDir}
@@ -360,9 +414,32 @@ func (e *exporter) service(s swarm.Service, netNames map[string]string, configs 
 		TTY:        cs.TTY,
 		Stdin:      cs.OpenStdin,
 	}
+	envSecret := e.secretEnvName(ns, name)
+	var envSecretValues map[string][]byte
 	for _, kv := range cs.Env {
 		k, v, _ := strings.Cut(kv, "=")
-		ctr.Env = append(ctr.Env, corev1.EnvVar{Name: k, Value: v})
+		if !isSecretEnv(e.secretEnv, k, v) || len(validation.IsEnvVarName(k)) > 0 {
+			ctr.Env = append(ctr.Env, corev1.EnvVar{Name: k, Value: v})
+			continue
+		}
+		if envSecretValues == nil {
+			envSecretValues = map[string][]byte{}
+		}
+		if _, dup := envSecretValues[k]; dup {
+			// Docker keeps the last value of a repeated name.
+			for i := range ctr.Env {
+				if ctr.Env[i].Name == k {
+					ctr.Env = append(ctr.Env[:i], ctr.Env[i+1:]...)
+					break
+				}
+			}
+		}
+		envSecretValues[k] = []byte(v)
+		ctr.Env = append(ctr.Env, corev1.EnvVar{Name: k, ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: envSecret}, Key: k}}})
+	}
+	if envSecretValues != nil {
+		e.envExternalSecret(ns, envSecret, spec.Name, envSecretValues, spec.Labels)
 	}
 	pod := corev1.PodSpec{}
 	if cs.Hostname != "" && len(validation.IsDNS1123Label(cs.Hostname)) == 0 {
@@ -820,6 +897,57 @@ func (e *exporter) externalSecretData(ns, name, remote, key string, labels map[s
 	return key
 }
 
+// secretEnvName picks the name of the Secret that holds the secret env
+// values of service ns/name: <name>-env, unless a Docker secret has it.
+func (e *exporter) secretEnvName(ns, name string) string {
+	n := name + "-env"
+	for i := 2; e.extSecrets[ns+"/"+n] != nil; i++ {
+		n = fmt.Sprintf("%s-env-%d", name, i)
+	}
+	return n
+}
+
+// envExternalSecret writes one ExternalSecret with one key per secret env
+// var of a service. The values are kept only as a placeholder Secret for the
+// round trip; they are never written.
+func (e *exporter) envExternalSecret(ns, name, service string, values map[string][]byte, labels map[string]string) {
+	es := &api.ExternalSecret{
+		TypeMeta: api.TypeMeta{APIVersion: api.ESOGroupVersion, Kind: api.KindExternalSecret},
+		Metadata: api.ObjectMeta{Name: name, Namespace: ns},
+		Spec: api.ExternalSecretSpec{
+			RefreshInterval: &api.Duration{Duration: time.Hour},
+			SecretStoreRef:  api.SecretStoreRef{Name: e.o.SecretStore, Kind: e.o.SecretStoreKind},
+			Target:          api.ExternalSecretTarget{Name: name},
+		},
+	}
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var remote []string
+	for _, k := range keys {
+		rk := e.o.SecretKeyPrefix + service + "-" + k
+		if e.o.SecretStoreProvider == ProviderAzureKV {
+			rk = azureName(rk)
+		}
+		remote = append(remote, rk)
+		es.Spec.Data = append(es.Spec.Data, api.ExternalSecretData{SecretKey: k, RemoteRef: api.RemoteReference{Key: rk}})
+	}
+	if l := k8sLabels(stripLabels(labels)); len(l) > 0 {
+		es.Spec.Target.Template = &api.ExternalSecretTemplate{}
+		es.Spec.Target.Template.Metadata.Labels = l
+	}
+	e.extSecrets[ns+"/"+name] = es
+	e.add(e.nsDir(ns)+"/externalsecret-"+name+".yaml", es)
+	e.set.ExternalSecrets = append(e.set.ExternalSecrets, es)
+	e.placeholders = append(e.placeholders, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Data:       values,
+	})
+	e.note("Service %s: env %s look like secrets, so their values are not exported: store the current values under secret store key(s) %s (ExternalSecret %s/%s). Change the name list with --secret-env-name or --no-default-secret-env-names.", service, strings.Join(keys, ", "), strings.Join(remote, ", "), ns, name)
+}
+
 func (e *exporter) pvc(ns, name string, vo *mount.VolumeOptions) {
 	if _, ok := e.pvcs[ns+"/"+name]; ok {
 		return
@@ -983,7 +1111,9 @@ func (e *exporter) write() error {
 	storeKeys := map[string][]string{}
 	for _, es := range e.extSecrets {
 		needStore[es.Metadata.Namespace] = true
-		storeKeys[es.Metadata.Namespace] = append(storeKeys[es.Metadata.Namespace], es.Spec.Data[0].RemoteRef.Key)
+		for _, d := range es.Spec.Data {
+			storeKeys[es.Metadata.Namespace] = append(storeKeys[es.Metadata.Namespace], d.RemoteRef.Key)
+		}
 	}
 	clusterStoreWritten := false
 	for _, ns := range nss {

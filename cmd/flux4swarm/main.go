@@ -574,6 +574,8 @@ func newImportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.SecretStoreProvider, "secret-store-provider", importer.ProviderVault, "template for the SecretStore: vault, azurekv or fake")
 	cmd.Flags().StringVar(&o.SecretKeyPrefix, "secret-key-prefix", "", "prefix for remoteRef.key")
 	cmd.Flags().StringVar(&exclude, "exclude", "", "regular expression of Swarm object names to skip")
+	cmd.Flags().StringSliceVar(&o.SecretEnvNames, "secret-env-name", nil, "extra env var name part (case-insensitive) whose values go to the secret store instead of Git; repeatable, added to the built-in list ("+strings.Join(importer.DefaultSecretEnvNames, ", ")+")")
+	cmd.Flags().BoolVar(&o.NoDefaultSecretEnvNames, "no-default-secret-env-names", false, "do not use the built-in --secret-env-name list; with no --secret-env-name, all env values are exported as is")
 	cmd.Flags().StringVar(&message, "commit-message", "", "commit message (default: one written from what changed, such as \"shop: api image 1.4→1.5, removed tmp-debug\")")
 	cmd.Flags().StringVar(&author, "author", "flux4swarm", "commit author name")
 	cmd.Flags().StringVar(&email, "author-email", "flux4swarm@users.noreply.github.com", "commit author email")
