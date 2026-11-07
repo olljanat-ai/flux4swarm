@@ -87,7 +87,12 @@ the key in its ExternalSecret `remoteRef.key`. Everything that has no
 Kubernetes equivalent (update policies, extra labels, placement preferences,
 ...) is kept in the `swarm.flux4swarm.io/service-spec` annotation, so
 reconciling the export gives the same Swarm services back. `--adopt` keeps
-the running image digests.
+the running image digests and, after the export is written, labels every
+service the export reproduces exactly as owned by the `flux-system`
+Kustomization (`--adopt-owner`), so the first reconcile changes nothing.
+Only labels are changed, so no task restarts. Services that use secrets are
+left for the first reconcile, because their new secret versions are created
+from the secret store.
 
 ## Run the GitOps controller
 

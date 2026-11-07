@@ -59,7 +59,7 @@ func RouteLabels(set *api.Set, secrets []*corev1.Secret, backend Backend) (map[s
 	for _, r := range routes {
 		id := r.Namespace + "/" + r.Name
 		var eps []string
-		tls := false
+		tls, allListeners := false, false
 		for _, p := range r.Spec.ParentRefs {
 			if p.Kind != nil && *p.Kind != "Gateway" {
 				continue
@@ -79,10 +79,18 @@ func RouteLabels(set *api.Set, secrets []*corev1.Secret, backend Backend) (map[s
 				}
 				continue
 			}
+			// No sectionName: the route attaches to every listener, which
+			// is what a Traefik router without entrypoints does. TLS is
+			// implied only when every listener terminates TLS.
+			allTLS := len(gwListeners[gw]) > 0
 			for _, l := range gwListeners[gw] {
-				eps = append(eps, string(l.Name))
-				tls = tls || l.Protocol == gatewayv1.HTTPSProtocolType
+				allTLS = allTLS && l.Protocol == gatewayv1.HTTPSProtocolType
 			}
+			tls = tls || allTLS
+			allListeners = true
+		}
+		if allListeners {
+			eps = nil
 		}
 		eps = uniq(eps)
 		var hosts []string

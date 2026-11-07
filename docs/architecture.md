@@ -143,7 +143,8 @@ first `backendRef` (found through the Kubernetes Service selector):
 | route name (`<name>-<i>` for several rules) | router and service name |
 | `hostnames`, `matches` (path prefix/exact/regex, method, headers, query) | `routers.<r>.rule` |
 | `parentRefs[].sectionName` (listener) | `routers.<r>.entrypoints` |
-| HTTPS listener on the Gateway (or `websecure`) | `routers.<r>.tls=true` |
+| parentRef without `sectionName` | no `entrypoints` label (all entrypoints) |
+| HTTPS listener on the Gateway (or `websecure`); without `sectionName` only when every listener is HTTPS | `routers.<r>.tls=true` |
 | annotations `swarm.flux4swarm.io/traefik-certresolver`, `-priority` | `tls.certresolver`, `priority` |
 | backendRef port → container port | `services.<r>.loadbalancer.server.port` |
 | `RequestRedirect` scheme | `redirectscheme` middleware |
@@ -197,6 +198,9 @@ the layout shown in the README. For each service it:
    live spec in `swarm.flux4swarm.io/service-spec`. The import fails if the
    patch does not reproduce the live spec, so reconciling an import is
    lossless.
+4. with `--adopt`, after the files are written, adds the owner and
+   `flux4swarm.io/spec-hash` labels to each live service whose rendered spec
+   matches, so the first reconcile is a no-op.
 
 Secret values are not readable from Docker; the generated SecretStore
 (`vault`, `azurekv` or `fake` template) and ExternalSecrets name the keys

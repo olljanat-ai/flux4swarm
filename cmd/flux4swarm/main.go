@@ -327,6 +327,8 @@ func newImportCmd() *cobra.Command {
 		author   string
 		email    string
 		credsDir string
+
+		adoptOwner string
 	)
 	cmd := &cobra.Command{
 		Use:   "import",
@@ -338,7 +340,8 @@ func newImportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.Path, "path", "", "cluster directory in the repository (default clusters/<cluster>)")
 	cmd.Flags().StringVar(&output, "output", "", "write to this local directory instead of Git")
 	cmd.Flags().BoolVar(&o.Bootstrap, "bootstrap", false, "write flux-system/gotk-sync.yaml so the controller (or Flux) syncs the export")
-	cmd.Flags().BoolVar(&o.Adopt, "adopt", false, "keep the image digests running now so the first reconcile pulls nothing new")
+	cmd.Flags().BoolVar(&o.Adopt, "adopt", false, "keep the image digests running now and label the exported services as owned, so the first reconcile changes nothing")
+	cmd.Flags().StringVar(&adoptOwner, "adopt-owner", "flux-system", "with --adopt: name of the Kustomization (in namespace flux-system) that takes ownership")
 	cmd.Flags().StringVar(&o.SecretStore, "secret-store", "default", "name of the SecretStore ExternalSecrets use")
 	cmd.Flags().StringVar(&o.SecretStoreKind, "secret-store-kind", api.KindSecretStore, "SecretStore or ClusterSecretStore")
 	cmd.Flags().StringVar(&o.SecretStoreProvider, "secret-store-provider", importer.ProviderVault, "template for the SecretStore: vault, azurekv or fake")
@@ -428,6 +431,19 @@ func newImportCmd() *cobra.Command {
 				fmt.Printf("pushed %d files to %s (%s) commit %s\n", len(res.Files), gf.url, gf.branch, pr.Commit)
 			} else {
 				fmt.Printf("no changes; %s (%s) is up to date\n", gf.url, gf.branch)
+			}
+		}
+		if o.Adopt && res.Desired != nil {
+			// Label the services the export reproduces exactly as owned by
+			// the flux-system Kustomization, so the first reconcile is a
+			// no-op instead of an update that only adds labels.
+			a := &swarm.Applier{Client: dc, Owner: swarm.Owner{Name: adoptOwner, Namespace: api.DefaultNamespace}}
+			changes, err := a.AdoptLabels(ctx, *res.Desired)
+			for _, ch := range changes {
+				fmt.Printf("%s/%s %s (%s)\n", ch.Kind, ch.Name, ch.Action, ch.Reason)
+			}
+			if err != nil {
+				return err
 			}
 		}
 		for _, n := range res.Notes {

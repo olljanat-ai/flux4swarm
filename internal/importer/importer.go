@@ -33,10 +33,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/yaml"
 
 	"github.com/olljanat-ai/flux4swarm/internal/api"
 	"github.com/olljanat-ai/flux4swarm/internal/render"
+	swarmapply "github.com/olljanat-ai/flux4swarm/internal/swarm"
 	"github.com/olljanat-ai/flux4swarm/internal/traefik"
 	"github.com/olljanat-ai/flux4swarm/internal/translate"
 )
@@ -95,6 +97,8 @@ type Result struct {
 	// writing so that removed objects disappear.
 	Clean []string
 	Notes []string
+	// Desired is the Swarm state the export renders to, for AdoptLabels.
+	Desired *swarmapply.Desired
 }
 
 // AppsDir is the directory, relative to the cluster directory, with the
@@ -810,13 +814,22 @@ func (e *exporter) roundTrip() error {
 			secrets = append(secrets, s)
 		}
 	}
-	out, err := render.Render(e.set, secrets)
+	set := e.set
+	if len(set.HTTPRoutes) > 0 {
+		// Render with the Gateway write() adds, as the reconcile will.
+		cp := *set
+		_, gw := traefik.Gateway(e.entryPoints, e.tlsEntryPoints)
+		cp.Gateways = append(append([]*gatewayv1.Gateway(nil), set.Gateways...), gw)
+		set = &cp
+	}
+	out, err := render.Render(set, secrets)
 	if err != nil {
 		return fmt.Errorf("render exported manifests: %w", err)
 	}
 	for _, w := range out.Warnings {
 		e.note("%s", w)
 	}
+	e.res.Desired = &out.Desired
 	for _, svc := range out.Desired.Services {
 		orig, ok := e.original[svc.Name]
 		if !ok {
@@ -838,6 +851,7 @@ func (e *exporter) roundTrip() error {
 		if p2, _ := translate.CreatePatch(check, orig); p2 != nil {
 			return fmt.Errorf("service %s: round trip is not lossless: %s", svc.Name, p2)
 		}
+		svc.Spec = check // what the reconcile renders from the annotation
 		meta := e.workload[svc.Name]
 		if meta.Annotations == nil {
 			meta.Annotations = map[string]string{}

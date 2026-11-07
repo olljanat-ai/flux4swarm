@@ -5,6 +5,10 @@ package traefik
 
 import (
 	"testing"
+
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	"github.com/olljanat-ai/flux4swarm/internal/api"
 )
 
 func TestParseRuleRoundTrip(t *testing.T) {
@@ -89,5 +93,31 @@ func TestImportRouter(t *testing.T) {
 	}
 	if int(*r.Spec.Rules[0].BackendRefs[0].Port) != 8080 || res.Ports[0] != 8080 {
 		t.Errorf("unexpected backend")
+	}
+}
+
+// A router without entrypoints imports as a route on the whole Gateway and
+// must render back without an entrypoints label (Traefik: all entrypoints).
+func TestRouteWithoutEntrypointsRoundTrip(t *testing.T) {
+	p := Parse(map[string]string{
+		"traefik.enable":                                     "true",
+		"traefik.http.routers.app.rule":                      "Host(`app.example.com`)",
+		"traefik.http.services.app.loadbalancer.server.port": "80",
+	})
+	res := Import(ImportInput{Namespace: "shop", K8sService: "app", Parsed: p, AllMiddlewares: p.Middlewares})
+	_, gw := Gateway(res.EntryPoints, res.TLSEntryPoints)
+	set := &api.Set{HTTPRoutes: res.Routes, Gateways: []*gatewayv1.Gateway{gw}}
+	labels, _, err := RouteLabels(set, nil, func(ns, svc string, port int32) (string, uint32, error) {
+		return "shop_app", 80, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := labels["shop_app"]
+	if _, ok := l["traefik.http.routers.app.entrypoints"]; ok || l["traefik.http.routers.app.rule"] != "Host(`app.example.com`)" {
+		t.Errorf("unexpected labels %v", l)
+	}
+	if _, ok := l["traefik.http.routers.app.tls"]; ok {
+		t.Errorf("tls set for a plain HTTP gateway: %v", l)
 	}
 }
