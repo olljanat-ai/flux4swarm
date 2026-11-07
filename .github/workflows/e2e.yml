@@ -25,10 +25,15 @@ jobs:
       E2E_K8S: "1"
       E2E_DIND_PORT: "23750"
       E2E_GIT_PORT: "23780"
-      E2E_STATE_DIR: ${{ runner.temp }}/flux4swarm-e2e
-      KUBECONFIG: ${{ runner.temp }}/flux4swarm-e2e/kubeconfig
     steps:
       - uses: actions/checkout@v7
+
+      # The runner context is not available in job-level env, so set the
+      # state paths here.
+      - name: Set e2e state paths
+        run: |
+          echo "E2E_STATE_DIR=$RUNNER_TEMP/flux4swarm-e2e" >> "$GITHUB_ENV"
+          echo "KUBECONFIG=$RUNNER_TEMP/flux4swarm-e2e/kubeconfig" >> "$GITHUB_ENV"
 
       - uses: actions/setup-go@v7
         with:
