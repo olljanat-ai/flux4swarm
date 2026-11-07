@@ -99,11 +99,9 @@ func TestImport(t *testing.T) {
 	assertImportedTree(t, repo, ns)
 }
 
-// TestRoundTripNoop: import followed by reconcile must not change what runs.
-// The first reconcile adopts the service (adds the flux4swarm management
-// labels to the service, not to the task template), so it may bump the
-// service version once; the task template and the running tasks must stay
-// the same, and a second reconcile must be a true no-op.
+// TestRoundTripNoop: `import --adopt` relabels the live service as managed,
+// so the reconcile that follows must not change it at all (contract: only
+// services that use secrets are still updated by the first reconcile).
 func TestRoundTripNoop(t *testing.T) {
 	requireController(t)
 	repo := newGitRepo(t)
@@ -116,25 +114,32 @@ func TestRoundTripNoop(t *testing.T) {
 	assertReconcileIsNoop(t, repo, svc)
 }
 
-// assertReconcileIsNoop reconciles twice and checks the contract above.
+// assertReconcileIsNoop checks, for a service without secrets, that import
+// --adopt already adopted it and that two reconciles leave it untouched
+// (same version, same task template, same running tasks).
 func assertReconcileIsNoop(t *testing.T, repo *gitRepo, svc string) {
 	t.Helper()
-	tmpl, tasks := taskTemplate(t, svc), runningTasks(t, svc)
-	reconcile(t, repo)
-	if got := taskTemplate(t, svc); got != tmpl {
-		t.Errorf("first reconcile after import changed the task template of %s:\nbefore: %s\nafter:  %s", svc, tmpl, got)
-	}
-	if got := runningTasks(t, svc); got != tasks {
-		t.Errorf("first reconcile after import replaced the tasks of %s: %s -> %s", svc, tasks, got)
-	}
-	if s := mustService(t, svc); s.Spec.Labels[managedByKey] != managedByVal {
-		t.Errorf("service %s not adopted: labels %v", svc, s.Spec.Labels)
-	}
 	before := mustService(t, svc)
-	reconcile(t, repo)
-	after := mustService(t, svc)
-	if after.Version.Index != before.Version.Index || after.UpdatedAt != before.UpdatedAt {
-		t.Errorf("second reconcile was not a no-op: version %d -> %d, updatedAt %s -> %s",
-			before.Version.Index, after.Version.Index, before.UpdatedAt, after.UpdatedAt)
+	if before.Spec.Labels[managedByKey] != managedByVal {
+		t.Errorf("import --adopt did not relabel %s as managed: labels %v", svc, before.Spec.Labels)
+	}
+	beforeRaw := docker(t, "service", "inspect", svc, "--format", "{{json .Spec}}")
+	tmpl, tasks := taskTemplate(t, svc), runningTasks(t, svc)
+	for i := 1; i <= 2; i++ {
+		reconcile(t, repo)
+		after := mustService(t, svc)
+		if after.Version.Index != before.Version.Index || after.UpdatedAt != before.UpdatedAt {
+			t.Errorf("reconcile #%d after import changed %s: version %d -> %d, updatedAt %s -> %s\nSpec before: %s\nSpec after:  %s\nPreviousSpec after: %s",
+				i, svc, before.Version.Index, after.Version.Index, before.UpdatedAt, after.UpdatedAt, beforeRaw,
+				docker(t, "service", "inspect", svc, "--format", "{{json .Spec}}"),
+				docker(t, "service", "inspect", svc, "--format", "{{json .PreviousSpec}}"))
+			before = after
+		}
+		if got := taskTemplate(t, svc); got != tmpl {
+			t.Errorf("reconcile #%d changed the task template of %s:\nbefore: %s\nafter:  %s", i, svc, tmpl, got)
+		}
+		if got := runningTasks(t, svc); got != tasks {
+			t.Errorf("reconcile #%d replaced the tasks of %s: %s -> %s", i, svc, tasks, got)
+		}
 	}
 }

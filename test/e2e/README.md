@@ -89,7 +89,7 @@ are not already present in your daemon.
 | `TestSwarmSmoke` | Swarm | The swarm is active and a manager. It can create, run and remove a service. |
 | `TestFlux2Smoke` | kind | Stock Flux2 fetches a test repo from the git server and applies a Deployment + ConfigMap in `clusters/e2e/apps/NS/`; the Deployment becomes available; removing it from Git prunes it. |
 | `TestImport` | binary | Creates a service in stack `NS` (label, env, 1 replica) that mounts a config and a secret, runs `import --adopt --bootstrap`, and checks the Flux bootstrap layout: `flux-system/{gotk-sync,kustomization}.yaml`, `apps/NS/{namespace,kustomization,secretstore}.yaml`, `deployment-web.yaml` (image, env, `replicas: 1`), a `configmap-*.yaml` with the config data and an `externalsecret-*.yaml`. The secret value must not appear anywhere in Git. |
-| `TestRoundTripNoop` | binary | Import, then reconcile twice. The first reconcile may adopt (add management labels to the service) but must not change the task template or replace tasks; the second must not change the service at all. |
+| `TestRoundTripNoop` | binary | A service without secrets: `import --adopt` must already relabel it as managed, and two reconciles must not change it (same version, task template and running tasks). |
 | `TestReconcileService` | binary | Deployment `web` in namespace `NS`: create (service `NS_web`, image, 1 replica, labels `managed-by` and `com.docker.stack.namespace`), update (new tag, 2 replicas), prune (remove `apps/NS` and reconcile with `--prune`). An unmanaged service must survive. |
 | `TestReconcileConfigAndSecret` | binary | A ConfigMap and an ESO `ExternalSecret` (fake `SecretStore`) mounted by a Deployment: exactly one Swarm config `NS_web-config_greeting-HASH10` and one secret `NS_web-secret_greeting-HASH10` (label `flux4swarm.io/name`), and the files in the running container have the right contents. |
 | `TestSameRepoSwarmAndFlux2` | binary + kind | One repo with a real bootstrap `flux-system/` (pinned `flux install --export` + `flux create … --export`) and an app (Deployment + ConfigMap + SecretStore + ExternalSecret). `flux-system/` passes `kubectl kustomize`, a server-side dry-run against the Flux CRDs and `flux build kustomization --dry-run`. flux4swarm reconciles it to Swarm and Flux2 to kind; both must have the same image/replicas, the config and secret (Swarm objects by label and file contents in the container; the K8s Secret created by ESO). Then image + replicas change in Git and both converge; then the app is removed and both prune. |
@@ -159,8 +159,10 @@ Source: `/mnt/project-files/flux4swarm/e2e-contract.md` and the PR #3 author.
   `kustomize.toolkit.fluxcd.io/{name,namespace}` and
   `com.docker.stack.namespace`. Prune removes only managed objects.
   Unlabelled objects are left alone.
-- The first reconcile after import may only add management labels to a
-  service (adoption); it must not change the task template or restart tasks.
+- `import --adopt` keeps running image digests and relabels the live services
+  as owned by Kustomization `flux-system/flux-system`, so the next reconcile
+  is a no-op (services that use secrets are relabelled by the first
+  reconcile instead; the no-op tests use services without secrets).
 - The tests add `io.flux4swarm.e2e=true` to the objects they create. With
   `E2E_MODE=host`, `down.sh` removes only objects that have this label.
 
