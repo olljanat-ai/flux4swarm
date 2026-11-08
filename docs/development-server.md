@@ -187,6 +187,19 @@ To test continuous sync instead, start with
 cut over as in
 [Large volumes](kubernetes-and-swarm.md#large-volumes-sync-continuously-cut-over-in-minutes).
 
+To test the automated flow instead, let the watcher run the sync services
+and the cutover (a bare repository on the server stands in for GitHub):
+
+```sh
+git init --bare -b main /tmp/fleet.git
+flux4swarm import --watch --git-url file:///tmp/fleet.git --cluster dev \
+  --volsync-env '' --volsync-sync 1m --migrate --listen 127.0.0.1:9797 &
+docker service update --label-add flux4swarm.io/migrate=kubernetes shop_db
+# logs: migration 1/4 ... 4/4, migration done; then the metrics:
+curl -s 127.0.0.1:9797/metrics | grep -E '^flux4swarm_(volume_sync|migration)'
+git clone /tmp/fleet.git /tmp/fleet && cat /tmp/fleet/clusters/dev/migrated/shop/db/MIGRATED.md
+```
+
 To test a restore again after more backups, change the trigger:
 `kubectl -n shop patch replicationdestination db --type merge -p '{"spec":{"trigger":{"manual":"again"}}}'`.
 

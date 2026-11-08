@@ -63,6 +63,44 @@ The distroless image has no shell or curl for a Docker `HEALTHCHECK`, and a
 restart would not fix an expired token anyway, so alert on the metrics
 instead (see [Alerts](#alerts)).
 
+### Volume sync and migration
+
+The watcher's `/metrics` also covers the Swarm side of moving data: the
+sync services (`import --volsync-sync` or `volume-backup --every`, whoever
+started them) and the cutovers of `import --migrate`. The sync metrics are
+read from Docker at scrape time: the tasks of each
+`flux4swarm-sync-<namespace>-<claim>` service and the status line it logs
+after every round (`flux4swarm-sync {...}` with restic's backup summary).
+That needs a log driver Docker can read back (`json-file`, `local` or
+`journald`, the default ones). Every sync metric has the labels `volume`
+(the Swarm volume), `namespace` and `claim` (the PersistentVolumeClaim on
+Kubernetes).
+
+| Metric | Type | Extra labels | Meaning |
+|--------|------|--------------|---------|
+| `flux4swarm_volume_sync_info` | gauge, always 1 | `service`, `node` | one per sync service |
+| `flux4swarm_volume_sync_up` | gauge | | 1 when the sync service has a running task |
+| `flux4swarm_volume_sync_interval_seconds` | gauge | | the backup interval |
+| `flux4swarm_volume_sync_rounds_total` | counter | `result` (`ok`, `error`) | rounds since the sync task started |
+| `flux4swarm_volume_sync_last_run_timestamp_seconds` | gauge | | end of the last round |
+| `flux4swarm_volume_sync_last_round_success` | gauge | | 1 when the last round succeeded |
+| `flux4swarm_volume_sync_last_success_timestamp_seconds` | gauge | | end of the last successful round: the copy on Kubernetes is at most this old plus the restore schedule |
+| `flux4swarm_volume_sync_last_duration_seconds` | gauge | | duration of the last successful round, about what the final backup adds to a cutover |
+| `flux4swarm_volume_sync_last_added_bytes` | gauge | | data the last round added (the increment), before compression |
+| `flux4swarm_volume_sync_last_added_packed_bytes` | gauge | | the same, as stored in the repository |
+| `flux4swarm_volume_sync_volume_bytes` | gauge | | size of the volume at the last successful round |
+| `flux4swarm_volume_sync_last_files` | gauge | `state` (`new`, `changed`, `unmodified`) | files of the last successful round |
+| `flux4swarm_migration_services` | gauge | `state` (`migrated`, `waiting`) | services recorded in `migrated/`, and labelled ones not cut over yet |
+| `flux4swarm_migration_cutovers_total` | counter | `result` (`success`, `error`) | cutover attempts since the watcher started |
+| `flux4swarm_migration_swarm_downtime_seconds` | gauge | `service`, `namespace`, `workload` | from scaling to 0 on Swarm until the manifests were ready for Git, per cutover since start |
+| `flux4swarm_migration_handed_over_timestamp_seconds` | gauge | `service`, `namespace`, `workload` | when the service was handed over |
+| `flux4swarm_migration_stopped_again_total` | counter | `service` | times a migrated service was found running on Swarm and scaled back to 0 |
+
+The rest of the downtime (the final restore and the start of the
+workload) happens on Kubernetes: the `migrate-<namespace>-<name>-restore`
+and `-app` Kustomizations show it in the Flux metrics and in
+`flux get kustomizations`.
+
 ## Grafana dashboard
 
 [deploy/monitoring/grafana/flux-gitops.json](../deploy/monitoring/grafana/flux-gitops.json)
@@ -73,6 +111,14 @@ only metrics both platforms have, so point it at a Prometheus that scrapes
 Flux on Kubernetes (with the kube-state-metrics config of
 flux2-monitoring-example), flux4swarm, or both, and filter with the
 namespace and kind variables.
+
+[deploy/monitoring/grafana/volume-sync.json](../deploy/monitoring/grafana/volume-sync.json)
+shows the sync services and cutovers: how many run, fail or fall behind,
+a table per volume (age of the last successful backup, interval, round
+duration, increment, size), the time since the last backup, increment,
+duration and size over time, and for `--migrate` the migrated and waiting
+services, failed cutovers, services started again on Swarm, and the Swarm
+downtime of each cutover. Filter it by Swarm volume.
 
 ## Running it on Swarm
 
@@ -86,6 +132,7 @@ docker config create prometheus.yml deploy/monitoring/prometheus.yml
 docker config create grafana-datasource deploy/monitoring/grafana/provisioning/datasources/prometheus.yaml
 docker config create grafana-dashboards deploy/monitoring/grafana/provisioning/dashboards/flux.yaml
 docker config create grafana-flux-gitops deploy/monitoring/grafana/flux-gitops.json
+docker config create grafana-volume-sync deploy/monitoring/grafana/volume-sync.json
 docker stack deploy -c deploy/monitoring/monitoring-stack.yaml monitoring
 ```
 
@@ -115,6 +162,10 @@ send them on with your Alertmanager.
 | `Flux4SwarmWatchUnhealthy` | `flux4swarm_watch_healthy == 0` for 5m: no successful export for `--unhealthy-after` | critical |
 | `Flux4SwarmWatchFailing` | 3 or more exports in a row failed, for 15m | warning |
 | `Flux4SwarmWatchDown` | the `import --watch` target is down for 10m | critical |
+| `Flux4SwarmVolumeSyncNotRunning` | a sync service has no running task for 10m | warning |
+| `Flux4SwarmVolumeSyncFailing` | the last backup round of a volume failed, for 15m | warning |
+| `Flux4SwarmVolumeSyncBehind` | no successful backup for three intervals (at least 15m) | warning |
+| `Flux4SwarmMigrationFailing` | a cutover failed in the last 30 minutes | warning |
 | `FluxReconciliationFailure` | a GitRepository or Kustomization is not Ready for 10m (the Flux rule, works on Kubernetes too) | warning |
 | `FluxResourceStale` | an object that is not suspended was not reconciled for an hour | warning |
 | `FluxResourceSuspended` | an object has been suspended for a day | info |

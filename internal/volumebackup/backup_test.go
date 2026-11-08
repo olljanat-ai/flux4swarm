@@ -256,3 +256,37 @@ func TestBackupEveryAndStop(t *testing.T) {
 		t.Errorf("StopSync = %v, %v", names, err)
 	}
 }
+
+func TestEnsureSync(t *testing.T) {
+	f := &fake{
+		services: []swarm.Service{dbService(mount.Mount{Type: mount.TypeVolume, Source: "shop_db", Target: "/db"})},
+		tasks:    map[string][]swarm.Task{"db": {task("n1", swarm.TaskStateRunning, 0)}},
+	}
+	o := Options{Repository: "rest:http://repo/", Env: map[string]string{"RESTIC_PASSWORD": "pw"}, Every: time.Minute, Poll: time.Millisecond}
+	r, err := EnsureSync(context.Background(), f, "shop_db", o)
+	if err != nil || r == nil || len(f.created) != 1 {
+		t.Fatalf("first: %+v, %v, created %d", r, err, len(f.created))
+	}
+	f.services = append(f.services, swarm.Service{ID: "sync", Spec: f.created[0]})
+	if r, err := EnsureSync(context.Background(), f, "shop_db", o); err != nil || r != nil || len(f.created) != 1 {
+		t.Errorf("second: %+v, %v, created %d", r, err, len(f.created))
+	}
+}
+
+func TestRestore(t *testing.T) {
+	m := mount.Mount{Type: mount.TypeVolume, Source: "shop_db", Target: "/db"}
+	o := Options{Repository: "rest:http://repo/", Env: map[string]string{"RESTIC_PASSWORD": "pw"}, Poll: time.Millisecond, Restore: true}
+	running := &fake{services: []swarm.Service{dbService(m)}, tasks: map[string][]swarm.Task{"db": {task("n1", swarm.TaskStateRunning, 0)}}, jobState: swarm.TaskStateComplete}
+	if _, err := Backup(context.Background(), running, "shop_db", o); err == nil || !strings.Contains(err.Error(), "stop it before restoring") {
+		t.Errorf("err = %v", err)
+	}
+	f := &fake{services: []swarm.Service{dbService(m)}, tasks: map[string][]swarm.Task{"db": {task("n1", swarm.TaskStateShutdown, time.Minute)}}, jobState: swarm.TaskStateComplete}
+	if _, err := Backup(context.Background(), f, "shop_db", o); err != nil {
+		t.Fatal(err)
+	}
+	s := f.created[0]
+	if s.Name != "flux4swarm-restore-shop-db" || s.TaskTemplate.ContainerSpec.Mounts[0].ReadOnly ||
+		!strings.Contains(s.TaskTemplate.ContainerSpec.Command[2], "restic restore latest --path /data --target /data --delete") {
+		t.Errorf("restore job %s, mount %+v:\n%s", s.Name, s.TaskTemplate.ContainerSpec.Mounts[0], s.TaskTemplate.ContainerSpec.Command[2])
+	}
+}

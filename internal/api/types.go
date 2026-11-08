@@ -62,6 +62,13 @@ const (
 	// Docker volume behind a PersistentVolumeClaim.
 	AnnotationVolumeDriver  = "swarm.flux4swarm.io/volume-driver"
 	AnnotationVolumeOptions = "swarm.flux4swarm.io/volume-options"
+	// AnnotationHeld on an exported Deployment records the Swarm replicas
+	// while Kubernetes holds it at 0 until its volumes are migrated.
+	AnnotationHeld = "flux4swarm.io/held-replicas"
+	// LabelMigrate on a Swarm service set to MigrateKubernetes asks
+	// import --migrate to move it to Kubernetes.
+	LabelMigrate      = "flux4swarm.io/migrate"
+	MigrateKubernetes = "kubernetes"
 	// AnnotationTraefikCertResolver on an HTTPRoute sets the router's
 	// tls.certresolver.
 	AnnotationTraefikCertResolver = "swarm.flux4swarm.io/traefik-certresolver"

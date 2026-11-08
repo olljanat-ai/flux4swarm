@@ -54,6 +54,7 @@ func newVolumeBackupCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&o.Timeout, "timeout", time.Hour, "how long to wait for each backup")
 	cmd.Flags().DurationVar(&o.Every, "every", 0, "instead of one backup, start a long-running sync service that backs up incrementally at this interval (e.g. 15m) until it is stopped; a later one-off volume-backup of the volume (the final copy) or --stop removes it")
 	cmd.Flags().IntVar(&o.Keep, "keep", 24, "with --every: snapshots to keep; every --keep rounds the older ones are forgotten and pruned")
+	cmd.Flags().BoolVar(&o.Restore, "restore", false, "the other way round, to roll back: restore the newest snapshot of each volume's repository (for example one VolSync wrote from the claim on Kubernetes) into the Swarm volume, deleting files that are not in it; the services using the volume must be stopped")
 	cmd.Flags().BoolVar(&stop, "stop", false, "remove the sync services of the volumes and do nothing else")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		o.Env = map[string]string{"RESTIC_PASSWORD": os.Getenv("RESTIC_PASSWORD")}

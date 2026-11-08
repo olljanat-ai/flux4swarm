@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -72,6 +73,11 @@ type Options struct {
 	// one-off job: it backs up the volume, sleeps Every and repeats until it
 	// is stopped (StopSync, or the next one-off Backup of the volume).
 	Every time.Duration
+	// Restore runs the job the other way round, for a rollback: it
+	// restores the newest snapshot of the repository into the volume
+	// (deleting files that are not in it). The services using the volume
+	// must be stopped.
+	Restore bool
 	// Keep is how many snapshots a sync service keeps (default 24); every
 	// Keep rounds the older ones are forgotten and pruned.
 	Keep int
@@ -263,6 +269,24 @@ func JobSpec(t *Target, image, secretID, secretName string, networks []string) s
 	return spec
 }
 
+// RestoreSpec returns the replicated-job service that restores the newest
+// snapshot of the repository into t, for a rollback. Unlike the backups it
+// mounts the volume read-write.
+func RestoreSpec(t *Target, image, secretID, secretName string, networks []string) swarm.ServiceSpec {
+	spec := JobSpec(t, image, secretID, secretName, networks)
+	spec.Name = serviceName("flux4swarm-restore-", t.Namespace, t.Claim)
+	spec.TaskTemplate.ContainerSpec.Mounts[0].ReadOnly = false
+	// VolSync's backups and ours both store the volume's files at the top
+	// of a /data snapshot.
+	spec.TaskTemplate.ContainerSpec.Command[2] = strings.Join([]string{
+		"set -eu",
+		"set -a; . /run/secrets/" + envFile + "; set +a",
+		"restic snapshots --latest 1 --path " + importer.VolSyncDataDir,
+		"restic restore latest --path " + importer.VolSyncDataDir + " --target " + importer.VolSyncDataDir + " --delete",
+	}, "\n")
+	return spec
+}
+
 // SyncSpec returns the long-running service that backs up t every
 // interval, keeping keep snapshots. Each round is incremental, and the
 // restic cache stays in the container between rounds, so a round of an
@@ -277,11 +301,15 @@ func SyncSpec(t *Target, image, secretID, secretName string, networks []string, 
 		"set -a; . /run/secrets/" + envFile + "; set +a",
 		"until restic cat config >/dev/null 2>&1 || restic init; do sleep 30; done",
 		"cd " + importer.VolSyncDataDir,
-		"n=0",
+		"n=0 ok=0 failed=0",
 		"while :; do",
-		"  n=$((n+1))",
-		"  echo \"=== round $n: $(date -u +%FT%TZ)\"",
-		"  " + backupCmd + " || echo \"backup failed, retrying next round\"",
+		"  n=$((n+1)) start=$(date +%s) r=ok",
+		// --json --quiet prints only the summary (and errors on stderr).
+		"  out=$(" + backupCmd + " --json --quiet) || { r=error; out=; }",
+		"  [ $r = ok ] && ok=$((ok+1)) || failed=$((failed+1))",
+		"  s=$(printf '%s\\n' \"$out\" | grep '\"message_type\":\"summary\"' | tail -n 1)",
+		// One line per round, read by the metrics of import --watch.
+		"  echo \"" + StatusPrefix + "{\\\"round\\\":$n,\\\"result\\\":\\\"$r\\\",\\\"ok\\\":$ok,\\\"failed\\\":$failed,\\\"start\\\":$start,\\\"end\\\":$(date +%s),\\\"summary\\\":${s:-null}}\"",
 		// forget and prune lock the repository exclusively, which makes a
 		// VolSync restore that runs at that moment fail and retry, so they
 		// run only every keep rounds.
@@ -292,6 +320,9 @@ func SyncSpec(t *Target, image, secretID, secretName string, networks []string, 
 	one := uint64(1)
 	spec := baseSpec(t, image, secretID, secretName, networks, syncName(t.Namespace, t.Claim), script)
 	spec.Labels[labelSync] = "true"
+	spec.Labels[labelNamespace] = t.Namespace
+	spec.Labels[labelClaim] = t.Claim
+	spec.Labels[labelEvery] = strconv.Itoa(secs)
 	spec.Mode = swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: &one}}
 	delay := 30 * time.Second
 	spec.TaskTemplate.RestartPolicy = &swarm.RestartPolicy{Condition: swarm.RestartPolicyConditionAny, Delay: &delay}
@@ -301,8 +332,18 @@ func SyncSpec(t *Target, image, secretID, secretName string, networks []string, 
 // backupCmd is the backup VolSync itself runs, so its restore picks it up.
 var backupCmd = "restic backup --host " + importer.VolSyncHost + " --exclude lost+found ."
 
-// labelSync marks the long-running sync services.
-const labelSync = "flux4swarm.io/volume-sync"
+// StatusPrefix starts the line a sync service logs after every round,
+// followed by a JSON SyncStatus.
+const StatusPrefix = "flux4swarm-sync "
+
+// Labels of the sync services: labelSync marks them, the others are read
+// by the metrics.
+const (
+	labelSync      = "flux4swarm.io/volume-sync"
+	labelNamespace = "flux4swarm.io/volume-sync-namespace"
+	labelClaim     = "flux4swarm.io/volume-sync-claim"
+	labelEvery     = "flux4swarm.io/volume-sync-interval-seconds"
+)
 
 func baseSpec(t *Target, image, secretID, secretName string, networks []string, name, script string) swarm.ServiceSpec {
 	m := t.Mount
@@ -414,6 +455,14 @@ func Backup(ctx context.Context, c Client, volume string, o Options) (*Result, e
 	}
 	repo := importer.VolSyncRepository(o.Repository, t.Namespace, t.Claim)
 	res := &Result{Volume: volume, Namespace: t.Namespace, Claim: t.Claim, Repository: repo, Node: t.Node, Running: t.Running}
+	if o.Restore {
+		if o.Every > 0 {
+			return nil, errors.New("a restore cannot run continuously")
+		}
+		if len(t.Running) > 0 {
+			return nil, fmt.Errorf("%s still running; stop it before restoring into volume %s", strings.Join(t.Running, ", "), volume)
+		}
+	}
 	if len(t.Running) > 0 && o.Every == 0 {
 		logf("warning: %s still running; stop it first for a consistent final copy", strings.Join(t.Running, ", "))
 	}
@@ -462,7 +511,12 @@ func Backup(ctx context.Context, c Client, volume string, o Options) (*Result, e
 	}()
 
 	spec := JobSpec(t, o.Image, sec.ID, secretName, o.Networks)
-	logf("backing up volume %s (claim %s/%s) to %s on node %s", volume, t.Namespace, t.Claim, repo, orAny(t.Node))
+	verb, done := "backing up volume %s (claim %s/%s) to %s on node %s", "volume %s backed up"
+	if o.Restore {
+		spec = RestoreSpec(t, o.Image, sec.ID, secretName, o.Networks)
+		verb, done = "restoring volume %s (claim %s/%s) from %s on node %s", "volume %s restored"
+	}
+	logf(verb, volume, t.Namespace, t.Claim, repo, orAny(t.Node))
 	svc, err := c.ServiceCreate(ctx, spec, swarm.ServiceCreateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("create job %s: %w", spec.Name, err)
@@ -483,7 +537,7 @@ func Backup(ctx context.Context, c Client, volume string, o Options) (*Result, e
 		for _, tk := range tasks {
 			switch tk.Status.State {
 			case swarm.TaskStateComplete:
-				logf("volume %s backed up", volume)
+				logf(done, volume)
 				return res, nil
 			case swarm.TaskStateFailed, swarm.TaskStateRejected:
 				return nil, fmt.Errorf("backup job %s %s: %s%s", spec.Name, tk.Status.State, tk.Status.Err, logs(cleanup, c, svc.ID))
@@ -556,4 +610,22 @@ func StopSync(ctx context.Context, c Client, volume string, poll time.Duration) 
 		}
 	}
 	return names, nil
+}
+
+// EnsureSync starts the sync service of the volume (Backup with o.Every)
+// unless one runs already. It returns nil when nothing was started.
+func EnsureSync(ctx context.Context, c Client, volume string, o Options) (*Result, error) {
+	if o.Every <= 0 {
+		return nil, errors.New("EnsureSync needs Options.Every")
+	}
+	services, err := c.ServiceList(ctx, swarm.ServiceListOptions{Filters: filters.NewArgs(filters.Arg("label", labelSync))})
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range services {
+		if s.Spec.Labels[api.LabelVolumeBackup] == volume && s.Spec.Labels[labelSync] != "" {
+			return nil, nil
+		}
+	}
+	return Backup(ctx, c, volume, o)
 }

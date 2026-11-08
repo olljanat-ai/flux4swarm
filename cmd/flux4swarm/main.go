@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -32,7 +33,9 @@ import (
 	"github.com/olljanat-ai/flux4swarm/internal/git"
 	"github.com/olljanat-ai/flux4swarm/internal/importer"
 	"github.com/olljanat-ai/flux4swarm/internal/merge"
+	"github.com/olljanat-ai/flux4swarm/internal/migrate"
 	"github.com/olljanat-ai/flux4swarm/internal/swarm"
+	"github.com/olljanat-ai/flux4swarm/internal/volumebackup"
 )
 
 // Set at build time with -ldflags "-X main.version=... -X main.commit=... -X main.date=...".
@@ -527,6 +530,47 @@ func printDiff(w io.Writer, st []controller.ObjectStatus) bool {
 	return drift
 }
 
+// cheapCheck reports whether watch mode can skip Git: the export is
+// unchanged and --migrate has nothing to do.
+func cheapCheck(ctx context.Context, dc *client.Client, o importer.Options, migrateOn bool, migrated map[string]bool, pending bool, last string) (bool, error) {
+	if migrateOn {
+		if pending {
+			return false, nil
+		}
+		need, err := migrate.NeedsRun(ctx, dc, migrated)
+		if err != nil || need {
+			return false, err
+		}
+		o.Migrated = migrated
+	}
+	res, err := importer.Export(ctx, dc, o)
+	if err != nil {
+		return false, err
+	}
+	return res.Hash() == last, nil
+}
+
+// syncSchedule is the restore schedule for sync services that back up
+// every d: the next cron step at or above d.
+func syncSchedule(d time.Duration) string {
+	m := int((d + time.Minute - 1) / time.Minute)
+	for _, step := range []int{1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30} {
+		if m <= step {
+			return fmt.Sprintf("*/%d * * * *", step)
+		}
+	}
+	h := (m + 59) / 60
+	for _, step := range []int{1, 2, 3, 4, 6, 8, 12} {
+		if h <= step {
+			if step == 1 {
+				return "0 * * * *"
+			}
+			return fmt.Sprintf("0 */%d * * *", step)
+		}
+	}
+	return "0 0 * * *"
+}
+
 func defaultRegistryConfig() string {
 	if v := os.Getenv("DOCKER_CONFIG"); v != "" {
 		return filepath.Join(v, "config.json")
@@ -557,6 +601,8 @@ func newImportCmd() *cobra.Command {
 		unhealthyAfter time.Duration
 		mergeEnvs      []string
 		basePath       string
+		migrateOn      bool
+		volsyncSync    time.Duration
 	)
 	cmd := &cobra.Command{
 		Use:   "import",
@@ -589,6 +635,9 @@ func newImportCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&o.VolSync, "volsync", false, "also export, for every PersistentVolumeClaim, a VolSync ReplicationDestination (restic mover) and its repository ExternalSecret, so Kubernetes restores the data copied by `flux4swarm volume-backup` (needs VolSync on the cluster)")
 	cmd.Flags().StringVar(&o.VolSyncSchedule, "volsync-schedule", "", "with --volsync: cron schedule of the restores (e.g. \"*/15 * * * *\"), to keep each claim close to a continuously synced Swarm volume (volume-backup --every); default: restore once")
 	cmd.Flags().StringSliceVar(&o.VolSyncEnv, "volsync-env", importer.DefaultVolSyncEnv, "with --volsync: restic env vars, besides RESTIC_REPOSITORY and RESTIC_PASSWORD, that the repository secret carries")
+	cmd.Flags().DurationVar(&volsyncSync, "volsync-sync", 0, "implies --volsync: keep a sync service (volume-backup --every) running on Swarm for every exported volume, backing it up at this interval, and restore on Kubernetes on a matching --volsync-schedule (derived when not set); the restic settings come from RESTIC_REPOSITORY, RESTIC_PASSWORD and the --volsync-env variables")
+	cmd.Flags().BoolVar(&o.VolSyncRestoreFirst, "volsync-restore-first", false, "implies --volsync, for a Kubernetes cluster built from scratch from the export (e.g. a nightly test cluster): write the claims and their one-off restores to <path>/"+importer.DataDir+" and Flux Kustomizations (<path>/"+importer.LayersFile+") that apply them first, wait until every claim is restored and only then start apps/ at the real replica counts; pair it with --volsync-sync so each rebuild gets data at most one sync interval old")
+	cmd.Flags().BoolVar(&migrateOn, "migrate", false, "cut over services labelled "+api.LabelMigrate+"="+api.MigrateKubernetes+" one by one: stop them on Swarm, back up the last increment of their volumes, and hand them to Kubernetes in <path>/"+migrate.Dir+"/ (where they stay; a migrated service is kept at 0 replicas on Swarm)")
 	cmd.Flags().BoolVar(&o.NoDefaultSecretEnvNames, "no-default-secret-env-names", false, "do not use the built-in --secret-env-name list; with no --secret-env-name, all env values are exported as is")
 	cmd.Flags().StringVar(&message, "commit-message", "", "commit message (default: one written from what changed, such as \"shop: api image 1.4→1.5, removed tmp-debug\")")
 	cmd.Flags().StringVar(&author, "author", "flux4swarm", "commit author name")
@@ -638,17 +687,101 @@ func newImportCmd() *cobra.Command {
 		if secretName != "" {
 			secret = store.Lookup(secretName, git.SecretKeys...)
 		}
+		if o.VolSyncRestoreFirst && len(mergeEnvs) > 0 {
+			return fmt.Errorf("--volsync-restore-first cannot be combined with --merge")
+		}
+		if volsyncSync > 0 {
+			o.VolSync = true
+			if o.VolSyncSchedule == "" && !o.VolSyncRestoreFirst {
+				o.VolSyncSchedule = syncSchedule(volsyncSync)
+			}
+		}
+		// The restic settings of the sync services and the final backups.
+		bo := volumebackup.Options{Repository: os.Getenv("RESTIC_REPOSITORY"), Env: map[string]string{"RESTIC_PASSWORD": os.Getenv("RESTIC_PASSWORD")}}
+		for _, k := range importer.VolSyncEnv(o.VolSyncEnv) {
+			if v, ok := os.LookupEnv(k); ok && k != "RESTIC_REPOSITORY" {
+				bo.Env[k] = v
+			}
+		}
+		if volsyncSync > 0 && (bo.Repository == "" || bo.Env["RESTIC_PASSWORD"] == "") {
+			return fmt.Errorf("--volsync-sync needs RESTIC_REPOSITORY and RESTIC_PASSWORD in the environment")
+		}
 		// pushed is the commit of the last export that changed Git.
 		var pushed string
+		// migrated are the services moved to Kubernetes, as of the last
+		// export; pending the cutovers not in Git yet.
+		var (
+			migrated   map[string]bool
+			pending    map[string]migrate.Cutover
+			migMetrics = &migrate.Metrics{}
+		)
+		// build exports the Swarm for the checkout at root: with --migrate it
+		// first cuts over the labelled services. plain is the hash of the
+		// export alone, for the cheap check in watch mode.
+		build := func(ctx context.Context, root string) (res *importer.Result, plain string, err error) {
+			eo := o
+			var mr *migrate.Result
+			if migrateOn {
+				mr, err = migrate.Run(ctx, dc, root, migrate.Options{Export: o, Backup: bo, Log: slog.Default(), Pending: pending, Metrics: migMetrics})
+				if err != nil {
+					return nil, "", fmt.Errorf("migrate: %w", err)
+				}
+				pending = mr.New
+				migrated = mr.Migrated
+				eo.Migrated = mr.Migrated
+			}
+			res, err = importer.Export(ctx, dc, eo)
+			if err != nil {
+				return nil, "", err
+			}
+			plain = res.Hash()
+			if mr != nil {
+				for f, b := range mr.Files {
+					res.Files[f] = b
+				}
+				res.Clean = append(res.Clean, mr.Owned...)
+			}
+			return res, plain, nil
+		}
+		// committed logs the cutovers that are now in Git or --output.
+		committed := func(where string) {
+			for svc, c := range pending {
+				slog.Info("migration done: handed over to Kubernetes", "service", svc, "directory", c.Dir, "commit", where,
+					"check", "flux get kustomizations -n flux-system | grep migrate-", "status", c.Dir+"/"+migrate.StatusFile)
+			}
+			pending = nil
+		}
+		// ensureSync keeps a sync service running for every exported volume.
+		ensureSync := func(ctx context.Context, res *importer.Result) {
+			if volsyncSync <= 0 {
+				return
+			}
+			so := bo
+			so.Every = volsyncSync
+			for _, v := range res.Volumes {
+				r, err := volumebackup.EnsureSync(ctx, dc, v, so)
+				switch {
+				case err != nil:
+					slog.Error("volume sync: could not start the sync service; retried at the next export", "volume", v, "error", err)
+				case r != nil:
+					slog.Info("volume sync: sync service started", "volume", v, "service", r.Service, "node", r.Node, "repository", r.Repository, "every", volsyncSync)
+				}
+			}
+		}
 		// export writes the Swarm to --output or Git. In watch mode files
 		// outside the apps directory are only created, never overwritten.
-		export := func(ctx context.Context) (*importer.Result, error) {
-			res, err := importer.Export(ctx, dc, o)
-			if err != nil {
-				return nil, err
-			}
-			var notes []string
+		export := func(ctx context.Context) (*importer.Result, string, error) {
+			var (
+				res   *importer.Result
+				plain string
+				notes []string
+			)
 			write := func(root string) error {
+				var err error
+				res, plain, err = build(ctx, root)
+				if err != nil {
+					return err
+				}
 				if len(mergeEnvs) == 0 {
 					return res.WriteTo(root, watch)
 				}
@@ -663,16 +796,18 @@ func newImportCmd() *cobra.Command {
 			}
 			if output != "" {
 				if err := write(output); err != nil {
-					return nil, err
+					return nil, "", err
 				}
 				if validate {
 					if err := importer.Validate(output, res.Root); err != nil {
-						return nil, err
+						return nil, "", err
 					}
 				}
 				fmt.Printf("wrote %d files to %s\n", len(res.Files), filepath.Join(output, res.Root))
 				printNotes()
-				return res, nil
+				committed(output)
+				ensureSync(ctx, res)
+				return res, plain, nil
 			}
 			verb := "Import"
 			if watch {
@@ -681,12 +816,26 @@ func newImportCmd() *cobra.Command {
 			msg := message
 			var describe func([]git.FileChange) string
 			if msg == "" {
-				msg = verb + " Docker Swarm state into " + res.Root
-				describe = func(changes []git.FileChange) string { return importer.CommitMessage(verb, changes) }
+				msg = verb + " Docker Swarm state into " + o.Path
+				if o.Path == "" {
+					msg = verb + " Docker Swarm state into clusters/" + o.Cluster
+				}
+				describe = func(changes []git.FileChange) string {
+					m := importer.CommitMessage(verb, changes)
+					if len(pending) == 0 {
+						return m
+					}
+					var svcs []string
+					for svc := range pending {
+						svcs = append(svcs, svc)
+					}
+					sort.Strings(svcs)
+					return "Migrate " + strings.Join(svcs, ", ") + " to Kubernetes\n\n" + m
+				}
 			}
 			work, err := os.MkdirTemp("", "flux4swarm-import-")
 			if err != nil {
-				return nil, err
+				return nil, "", err
 			}
 			defer os.RemoveAll(work)
 			pr, err := git.CommitAndPush(ctx, filepath.Join(work, "repo"), git.PushOptions{
@@ -703,7 +852,10 @@ func newImportCmd() *cobra.Command {
 				},
 			})
 			if err != nil {
-				return nil, err
+				for svc := range pending {
+					slog.Warn("migration not in Git yet: the service stays stopped on Swarm and the hand-over is pushed again at the next export", "service", svc, "error", err)
+				}
+				return nil, "", err
 			}
 			printNotes()
 			if pr.Changed {
@@ -712,7 +864,9 @@ func newImportCmd() *cobra.Command {
 			} else {
 				fmt.Printf("no changes; %s (%s) is up to date\n", gf.url, gf.branch)
 			}
-			return res, nil
+			committed(pr.Commit)
+			ensureSync(ctx, res)
+			return res, plain, nil
 		}
 		if watch {
 			if o.Adopt {
@@ -725,7 +879,8 @@ func newImportCmd() *cobra.Command {
 			}
 			status := importer.NewWatchStatus(unhealthyAfter)
 			if listen != "" {
-				srv := &http.Server{Addr: listen, Handler: status.Handler(), ReadHeaderTimeout: 10 * time.Second}
+				// The sync services are read from Docker at scrape time.
+				srv := &http.Server{Addr: listen, Handler: status.Handler(volumebackup.Collector{Client: dc}, migMetrics), ReadHeaderTimeout: 10 * time.Second}
 				go func() {
 					if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 						slog.Error("status server", "error", err)
@@ -745,31 +900,31 @@ func newImportCmd() *cobra.Command {
 					// unchanged hash means Git is already up to date, unless
 					// someone edited it (the periodic full resync repairs that).
 					if !full {
-						res, err := importer.Export(ctx, dc, o)
+						cheap, err := cheapCheck(ctx, dc, o, migrateOn, migrated, len(pending) > 0, last)
 						if err != nil {
 							return err
 						}
-						if res.Hash() == last {
+						if cheap {
 							slog.Debug("export unchanged")
 							return nil
 						}
 					}
 					pushed = ""
-					res, err := export(ctx)
+					res, plain, err := export(ctx)
 					if err != nil {
 						return err
 					}
 					if pushed != "" {
 						status.Committed(pushed)
 					}
-					last = res.Hash()
+					last = plain
 					for _, sk := range res.Skipped {
 						slog.Debug("skipped", "object", sk.String())
 					}
 					return nil
 				})
 		}
-		res, err := export(ctx)
+		res, _, err := export(ctx)
 		if err != nil {
 			return err
 		}

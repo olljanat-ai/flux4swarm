@@ -103,6 +103,19 @@ type Options struct {
 	// VolSyncSchedule is a cron schedule for the restores; without it the
 	// ReplicationDestination restores once (manual trigger "initial").
 	VolSyncSchedule string
+	// VolSyncCutover exports for the final hand-over of one service: the
+	// ReplicationDestinations restore once more (manual trigger "final")
+	// and the workloads are not held at 0 replicas.
+	VolSyncCutover bool
+	// VolSyncRestoreFirst is for Kubernetes clusters built from scratch
+	// from the export, such as a nightly test cluster: the claims, their
+	// one-off restores (manual trigger "initial") and what they need go to
+	// DataDir, Flux applies DataDir first and waits for the restores, then
+	// apps/ with the workloads at their real replica counts.
+	VolSyncRestoreFirst bool
+	// Migrated names the Swarm services that have moved to Kubernetes:
+	// they are left out of apps/ (their manifests live in migrated/).
+	Migrated map[string]bool
 }
 
 // DefaultSecretEnvNames are the well-known env var name parts that hold
@@ -160,6 +173,8 @@ type Result struct {
 	// writing so that removed objects disappear.
 	Clean []string
 	Notes []string
+	// Volumes are the Swarm volumes exported as PersistentVolumeClaims.
+	Volumes []string
 	// Skipped lists the Swarm objects that were not exported, and why.
 	Skipped []Skipped
 	// Desired is the Swarm state the export renders to, for AdoptLabels.
@@ -183,11 +198,20 @@ const (
 	SkippedExcluded = "matches --exclude"
 	SkippedUnused   = "unused version of a flux4swarm managed object"
 	SkippedBackup   = "temporary object of flux4swarm volume-backup"
+	SkippedMigrated = "migrated to Kubernetes, see migrated/"
 )
 
 func (e *exporter) skipped(kind, name, reason string) {
 	e.res.Skipped = append(e.res.Skipped, Skipped{Kind: kind, Name: name, Reason: reason})
 }
+
+// DataDir is the directory, relative to the cluster directory, with the
+// claims and restores of VolSyncRestoreFirst.
+const DataDir = "data"
+
+// LayersFile, in the cluster directory, holds the Flux Kustomizations of
+// VolSyncRestoreFirst: data first, then apps.
+const LayersFile = "layers.yaml"
 
 // AppsDir is the directory, relative to the cluster directory, with the
 // application manifests.
@@ -232,6 +256,12 @@ func (o *Options) defaults() error {
 	}
 	if o.GitSecret == "" {
 		o.GitSecret = "flux-system"
+	}
+	if o.VolSyncRestoreFirst {
+		o.VolSync = true
+		if o.VolSyncSchedule != "" {
+			return fmt.Errorf("restore first restores once, when the cluster is built; it cannot be combined with a restore schedule")
+		}
 	}
 	return nil
 }
@@ -284,6 +314,9 @@ func Export(ctx context.Context, c Client, o Options) (*Result, error) {
 		pvcs:        map[string]*corev1.PersistentVolumeClaim{},
 	}
 	e.res.Clean = []string{o.Path + "/" + AppsDir}
+	if o.VolSyncRestoreFirst {
+		e.res.Clean = append(e.res.Clean, o.Path+"/"+DataDir)
+	}
 	if err := e.run(ctx, c); err != nil {
 		return nil, err
 	}
@@ -341,6 +374,7 @@ func (e *exporter) run(ctx context.Context, c Client) error {
 			allMW[k] = v
 		}
 	}
+	migratedConfigs, migratedSecrets := map[string]bool{}, map[string]bool{}
 	for _, s := range services {
 		if e.o.skip(s.Spec.Name) {
 			e.skipped(swarmapply.KindService, s.Spec.Name, SkippedExcluded)
@@ -348,6 +382,22 @@ func (e *exporter) run(ctx context.Context, c Client) error {
 		}
 		if _, ok := s.Spec.Labels[api.LabelVolumeBackup]; ok {
 			e.skipped(swarmapply.KindService, s.Spec.Name, SkippedBackup)
+			continue
+		}
+		if e.o.Migrated[s.Spec.Name] {
+			e.skipped(swarmapply.KindService, s.Spec.Name, SkippedMigrated)
+			// Keep the namespace (and its SecretStore) that the migrated
+			// manifests still live in.
+			ns, _ := splitNS(s.Spec.Name, s.Spec.Labels)
+			e.nsUsed[ns] = true
+			if cs := s.Spec.TaskTemplate.ContainerSpec; cs != nil {
+				for _, r := range cs.Configs {
+					migratedConfigs[r.ConfigID] = true
+				}
+				for _, r := range cs.Secrets {
+					migratedSecrets[r.SecretID] = true
+				}
+			}
 			continue
 		}
 		if err := e.service(s, netNames, configByID, secretByID, allMW); err != nil {
@@ -358,7 +408,7 @@ func (e *exporter) run(ctx context.Context, c Client) error {
 	for _, cf := range configs {
 		cf := configByID[cf.ID]
 		name := logicalName(cf.Spec.Name, cf.Spec.Labels)
-		if _, done := e.cmKeys[name]; done {
+		if _, done := e.cmKeys[name]; done || migratedConfigs[cf.ID] {
 			continue
 		}
 		if e.o.skip(name) {
@@ -397,6 +447,10 @@ func (e *exporter) run(ctx context.Context, c Client) error {
 			continue
 		}
 		ns, short := splitNS(name, s.Spec.Labels)
+		if _, done := e.extSecrets[ns+"/"+dnsName(short)]; migratedSecrets[s.ID] && !done {
+			// Only used by migrated services: it lives in migrated/.
+			continue
+		}
 		e.externalSecret(ns, dnsName(short), name, s.Spec.Labels)
 	}
 	if err := e.roundTrip(); err != nil {
@@ -576,6 +630,9 @@ func (e *exporter) service(s swarm.Service, netNames map[string]string, configs 
 			pod.Volumes = appendVolume(pod.Volumes, corev1.Volume{Name: claim, VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim}}})
 			e.pvc(ns, claim, m.VolumeOptions)
+			if !contains(e.res.Volumes, m.Source) {
+				e.res.Volumes = append(e.res.Volumes, m.Source)
+			}
 		case mount.TypeBind:
 			pod.Volumes = append(pod.Volumes, corev1.Volume{Name: vname, VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: m.Source}}})
 		case mount.TypeTmpfs:
@@ -686,6 +743,18 @@ func (e *exporter) service(s swarm.Service, netNames map[string]string, configs 
 		if r := spec.Mode.Replicated; r != nil && r.Replicas != nil {
 			n := int32(*r.Replicas)
 			d.Spec.Replicas = &n
+			if n > 0 && e.held(tpl.Spec) {
+				// Kubernetes waits for the data: the restore and the
+				// application must not use the claim at the same time.
+				// The round trip keeps the Swarm replicas in the
+				// service-spec annotation.
+				zero := int32(0)
+				d.Spec.Replicas = &zero
+				if d.Annotations == nil {
+					d.Annotations = map[string]string{}
+				}
+				d.Annotations[api.AnnotationHeld] = strconv.Itoa(int(n))
+			}
 		}
 		if uc := spec.UpdateConfig; uc != nil && uc.Order == swarm.UpdateOrderStartFirst && uc.Parallelism == 1 {
 			d.Spec.Strategy = appsv1.DeploymentStrategy{Type: appsv1.RollingUpdateDeploymentStrategyType}
@@ -1001,6 +1070,14 @@ func (e *exporter) pvc(ns, name string, vo *mount.VolumeOptions) {
 			p.Labels = l
 		}
 	}
+	if e.o.VolSync {
+		// The claim holds the migrated data: Flux must never delete it,
+		// not even when it moves from apps/ to migrated/ at cutover.
+		if p.Annotations == nil {
+			p.Annotations = map[string]string{}
+		}
+		p.Annotations["kustomize.toolkit.fluxcd.io/prune"] = "disabled"
+	}
 	e.pvcs[ns+"/"+name] = p
 	e.add(e.nsDir(ns)+"/persistentvolumeclaim-"+name+".yaml", p)
 	e.set.PVCs = append(e.set.PVCs, p)
@@ -1187,15 +1264,28 @@ func (e *exporter) write() error {
 		}
 	}
 
+	if e.o.VolSyncRestoreFirst {
+		e.splitData()
+	}
+
 	// Per-directory kustomization.yaml files.
 	dirs := map[string][]string{}
 	for f := range e.files {
 		dirs[path.Dir(f)] = append(dirs[path.Dir(f)], path.Base(f))
 	}
 	appsRoot := e.o.Path + "/" + AppsDir
-	var appDirs []string
+	dataRoot := e.o.Path + "/" + DataDir
+	var appDirs, dataDirs []string
 	for d, files := range dirs {
 		if d == appsRoot {
+			continue
+		}
+		if strings.HasPrefix(d, dataRoot+"/") {
+			sort.Strings(files)
+			if err := e.render(d+"/kustomization.yaml", kustomization(files)); err != nil {
+				return err
+			}
+			dataDirs = append(dataDirs, strings.TrimPrefix(d, dataRoot+"/"))
 			continue
 		}
 		sort.Strings(files)
@@ -1215,6 +1305,21 @@ func (e *exporter) write() error {
 	}
 	if err := e.render(appsRoot+"/kustomization.yaml", kustomization(rootRes)); err != nil {
 		return err
+	}
+	if e.o.VolSyncRestoreFirst {
+		sort.Strings(dataDirs)
+		dataRes := append([]string(nil), dirs[dataRoot]...)
+		sort.Strings(dataRes)
+		dataRes = append(dataRes, dataDirs...)
+		if dataRes == nil {
+			dataRes = []string{}
+		}
+		if err := e.render(dataRoot+"/kustomization.yaml", kustomization(dataRes)); err != nil {
+			return err
+		}
+		if err := e.layers(); err != nil {
+			return err
+		}
 	}
 	for f, objs := range e.files {
 		if err := e.render(f, objs...); err != nil {

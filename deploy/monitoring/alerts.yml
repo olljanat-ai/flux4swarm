@@ -39,6 +39,43 @@ groups:
           summary: "flux4swarm import --watch cannot be scraped"
           description: "{{ $labels.instance }} has been down for 10 minutes."
 
+  # Sync services (volume-backup --every, import --volsync-sync) and
+  # cutovers (import --migrate), read by `import --watch` from Docker.
+  - name: flux4swarm-volume-sync
+    rules:
+      - alert: Flux4SwarmVolumeSyncNotRunning
+        expr: flux4swarm_volume_sync_up == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sync service of volume {{ $labels.volume }} has no running task"
+          description: "docker service ps flux4swarm-sync-{{ $labels.namespace }}-{{ $labels.claim }} shows why (node down, volume plugin, image pull)."
+      - alert: Flux4SwarmVolumeSyncFailing
+        expr: flux4swarm_volume_sync_last_round_success == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backups of volume {{ $labels.volume }} are failing"
+          description: "The last backup round of {{ $labels.namespace }}/{{ $labels.claim }} failed. docker service logs flux4swarm-sync-{{ $labels.namespace }}-{{ $labels.claim }} shows the restic error (credentials, repository unreachable, lock)."
+      - alert: Flux4SwarmVolumeSyncBehind
+        # Three missed intervals, with at least 15 minutes of slack.
+        expr: time() - flux4swarm_volume_sync_last_success_timestamp_seconds > clamp_min(3 * flux4swarm_volume_sync_interval_seconds, 900)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Volume {{ $labels.volume }} has not been backed up for {{ $value | humanizeDuration }}"
+          description: "The copy of {{ $labels.namespace }}/{{ $labels.claim }} on Kubernetes falls behind the Swarm volume, and the final backup at cutover grows."
+      - alert: Flux4SwarmMigrationFailing
+        expr: increase(flux4swarm_migration_cutovers_total{result="error"}[30m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A service cutover to Kubernetes failed"
+          description: "{{ $labels.instance }}: the watcher logs 'migration failed' with the service and reason, and retries at the next export. The service may be stopped on Swarm meanwhile."
+
   # The controller (`flux4swarm controller`). The gotk_resource_info rules
   # are the Flux ones and work for Flux on Kubernetes as well.
   - name: flux4swarm-controller

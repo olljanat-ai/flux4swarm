@@ -1,27 +1,40 @@
-# flux4swarm
+# Flux4Swarm
 
-GitOps for Docker Swarm that reads the same Git repository as
-[Flux v2](https://github.com/fluxcd/flux2) on Kubernetes.
+**Move from Docker Swarm to Kubernetes one service at a time, with the
+data, without a big-bang weekend.**
 
-The repository holds genuine Flux objects (`GitRepository`, `OCIRepository`,
-`Kustomization`)
-and plain Kubernetes manifests (`Deployment`, `Service`, `ConfigMap`,
-`PersistentVolumeClaim`, External Secrets Operator `ExternalSecret`, Gateway
-API `HTTPRoute`). Stock Flux applies them to a Kubernetes cluster;
-flux4swarm builds them with the real kustomize library and translates them
-into Docker Swarm services, configs, secrets, volumes and Traefik labels. That
-makes it a migration helper: run existing Swarm environments and new
-Kubernetes clusters from one repository, and move workloads over when you
-are ready.
+Flux4Swarm is GitOps for Docker Swarm that reads the same Git repository as
+[Flux v2](https://github.com/fluxcd/flux2) on Kubernetes. One repository of
+genuine Flux objects and plain Kubernetes manifests runs both platforms:
+stock Flux applies it to Kubernetes, and Flux4Swarm builds it with the real
+kustomize library and turns it into Swarm services, configs, secrets,
+volumes and Traefik labels.
 
-flux4swarm also has an **import** mode that dumps a running Swarm (including
-`docker stack deploy` stacks and Traefik Swarm provider labels) into that
-format and pushes it to GitHub or Azure DevOps.
+- **Start from what runs today.** `flux4swarm import` turns a live Swarm
+  (stacks, Traefik labels, configs, secrets) into Flux and Kubernetes
+  manifests in GitHub or Azure DevOps, with a readiness report of what still
+  blocks each service on Kubernetes.
+- **Keep teams shipping.** With `import --watch` the Swarm stays the source
+  of truth: every `docker stack deploy` becomes a commit that Flux rolls out
+  on Kubernetes too, so platform work starts while production runs.
+- **Bring the data along.** Volumes on any driver, however exotic, are
+  backed up incrementally with restic and restored by VolSync into the
+  matching PersistentVolumeClaims, continuously if you like, so the copy on
+  Kubernetes is minutes behind.
+- **Cut over by label.** Put `flux4swarm.io/migrate=kubernetes` on a
+  service: Flux4Swarm stops it on Swarm, copies the last increment, hands it
+  to Kubernetes in Git and keeps it stopped on Swarm. Downtime is the last
+  increment, and a rollback is one deleted directory.
+- **Watch it happen.** Prometheus metrics, Grafana dashboards and alerts
+  cover the Swarm controller, the export, every volume sync and every cutover.
+- **Or just run Swarm the GitOps way.** `flux4swarm controller` reconciles
+  the repository to Swarm like Flux's kustomize-controller, with drift
+  detection, pruning and notifications.
 
 See [docs/architecture.md](docs/architecture.md) for the design and the
 complete mapping.
 
-## Two modes
+## Modes
 
 | Mode | Command | Use it to |
 |------|---------|-----------|
@@ -29,6 +42,8 @@ complete mapping.
 | **Merge** | `flux4swarm merge` | Combine the imports of several Swarms (development, acceptance, production) into a shared Kustomize base plus a small overlay per environment that only patches what differs. |
 | **Continuous import** | `flux4swarm import --watch` | Keep the Swarm as the source of truth (teams keep using `docker stack deploy`) and commit every change to Git, so Flux keeps a Kubernetes cluster in sync while the platform team adds Kubernetes-only features on top. |
 | **GitOps** | `flux4swarm controller` (loop) / `flux4swarm reconcile` (one pass) | Pull the repository, build it like Flux's kustomize-controller, apply it to Swarm, prune what was removed and wait for services to converge. |
+| **Volume data** | `flux4swarm volume-backup` / `import --volsync-sync` | Copy Swarm volumes (any volume driver) to restic repositories that VolSync restores into the matching PersistentVolumeClaims, once or continuously while the services keep running on Swarm. |
+| **Service-by-service cutover** | `flux4swarm import --watch --migrate` | Move one labelled service at a time: stop it on Swarm, copy the last data increment, hand it to Kubernetes in Git, and keep it stopped on Swarm until you roll it back. |
 
 A typical migration: import once with `--bootstrap`, review the commit,
 start the controller on the Swarm, and point Flux on Kubernetes at the same
@@ -72,7 +87,7 @@ docker build -t flux4swarm .
 `flux4swarm version` prints the version, commit and build date.
 To cut a release, push a `vX.Y.Z` tag, or run the **release** workflow from the Actions tab with the version (e.g. `0.1.0`); it tags the head of the selected branch and runs GoReleaser.
 
-flux4swarm talks to the Docker Engine API of a Swarm **manager** and honours
+Flux4Swarm talks to the Docker Engine API of a Swarm **manager** and honours
 `DOCKER_HOST`, `DOCKER_TLS_VERIFY` and `DOCKER_CERT_PATH`.
 
 ## Import an existing Swarm
@@ -171,15 +186,36 @@ repository that it restores from. The copy is read through Docker with the
 volume's own driver, so NFS options, plugins and cluster volumes work the
 same as local volumes. For large volumes, `volume-backup --every 15m` and
 `import --volsync-schedule` keep both sides in sync incrementally, so the
-cutover only copies the last changes. See
-[docs/kubernetes-and-swarm.md](docs/kubernetes-and-swarm.md#moving-volume-data-restic--volsync).
+cutover only copies the last changes. `volume-backup --restore` copies the
+other way for a rollback.
+
+With `import --watch` all of it runs on its own:
+
+```sh
+flux4swarm import --watch --cluster prod --git-url https://github.com/acme/fleet \
+  --volsync-sync 15m --migrate
+docker service update --label-add flux4swarm.io/migrate=kubernetes shop_db
+```
+
+`--volsync-sync` keeps a sync service running for every volume and
+restores on a matching schedule. `--migrate` cuts over each labelled
+service: it stops the service on Swarm, backs up the last increment, moves
+it to `migrated/` in Git, where Flux restores the data before it starts
+the workload, and keeps it stopped on Swarm until it is rolled back. Every
+step is logged and recorded in `migrated/<namespace>/<name>/MIGRATED.md`.
+`--volsync-restore-first` instead builds clusters from scratch, such as a
+nightly test cluster, that restore the newest data before the applications
+start. See
+[docs/kubernetes-and-swarm.md](docs/kubernetes-and-swarm.md#moving-volume-data-restic--volsync)
+and the [metrics and dashboard](docs/monitoring.md#volume-sync-and-migration).
 
 ### Keep exporting (Swarm stays the source of truth)
 
 `import --watch` keeps running: it exports again after every Swarm service,
 config or secret event (after `--debounce`, default 5s, so one `docker stack
 deploy` gives one commit) and every `--interval` (default 10m), and commits
-only when the export differs. Swarm is never changed (`--adopt` is refused).
+only when the export differs. Swarm is not changed (`--adopt` is refused),
+except by the sync services of `--volsync-sync` and the cutovers of `--migrate`.
 The export owns `clusters/<cluster>/apps/` and `MIGRATION.md` and rewrites them every time; files
 anywhere else, such as `flux-system/` or the platform team's overlays and
 patches, are created once when missing and then left alone. That is how
@@ -354,8 +390,8 @@ Status is served on `:9797`: `/status` (like `flux get all`, including the
 ## Notifications and webhook receivers
 
 Put Flux's own notification objects in the repository; stock Flux and
-flux4swarm both use them. Alerts send the Kustomization and GitRepository
-events of flux4swarm to Providers, and Receivers trigger a reconcile when Git
+Flux4Swarm both use them. Alerts send the Kustomization and GitRepository
+events of Flux4Swarm to Providers, and Receivers trigger a reconcile when Git
 (or a registry) calls a webhook.
 
 ```yaml

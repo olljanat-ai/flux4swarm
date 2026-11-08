@@ -123,14 +123,15 @@ func timePtr(t time.Time) *time.Time {
 
 // Handler serves /healthz (503 after UnhealthyAfter without a successful
 // export), /readyz (503 until the first successful export), /status and
-// /metrics.
-func (s *WatchStatus) Handler() http.Handler {
+// /metrics, with the extra collectors added to /metrics.
+func (s *WatchStatus) Handler(extra ...prometheus.Collector) http.Handler {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		watchCollector{s},
 	)
+	reg.MustRegister(extra...)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		st := s.State()
