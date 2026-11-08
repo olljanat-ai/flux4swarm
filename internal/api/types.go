@@ -37,7 +37,10 @@ const (
 	LabelName               = "flux4swarm.io/name"
 	LabelSpecHash           = "flux4swarm.io/spec-hash"
 	LabelExternalSecret     = "flux4swarm.io/external-secret"
-	LabelStackNamespace     = "com.docker.stack.namespace"
+	// LabelVolumeBackup marks the temporary job and secret of
+	// `flux4swarm volume-backup`; import skips them.
+	LabelVolumeBackup   = "flux4swarm.io/volume-backup"
+	LabelStackNamespace = "com.docker.stack.namespace"
 )
 
 // Annotations understood on Kubernetes objects. Stock Flux ignores them.
@@ -59,6 +62,21 @@ const (
 	// Docker volume behind a PersistentVolumeClaim.
 	AnnotationVolumeDriver  = "swarm.flux4swarm.io/volume-driver"
 	AnnotationVolumeOptions = "swarm.flux4swarm.io/volume-options"
+	// AnnotationHeld on an exported Deployment records the Swarm replicas
+	// while Kubernetes holds it at 0 until its volumes are migrated.
+	AnnotationHeld = "flux4swarm.io/held-replicas"
+	// LabelVolumeSyncSchedule on a Swarm service sets how its volumes are
+	// synced by import --volsync-sync[-schedule]: a duration ("15m") or a
+	// 5-field cron schedule in UTC ("0 1 * * *"), overriding the flags.
+	LabelVolumeSyncSchedule = "flux4swarm.io/volume-sync-schedule"
+	// LabelVolumeRestoreSchedule on a Swarm service sets the cron schedule
+	// of the restores of its claims on Kubernetes. Default: the
+	// LabelVolumeSyncSchedule cron, or --volsync-schedule.
+	LabelVolumeRestoreSchedule = "flux4swarm.io/volume-restore-schedule"
+	// LabelMigrate on a Swarm service set to MigrateKubernetes asks
+	// import --migrate to move it to Kubernetes.
+	LabelMigrate      = "flux4swarm.io/migrate"
+	MigrateKubernetes = "kubernetes"
 	// AnnotationTraefikCertResolver on an HTTPRoute sets the router's
 	// tls.certresolver.
 	AnnotationTraefikCertResolver = "swarm.flux4swarm.io/traefik-certresolver"
@@ -280,11 +298,14 @@ type ExternalSecretTarget struct {
 	Template *ExternalSecretTemplate `json:"template,omitempty"`
 }
 
-// ExternalSecretTemplate carries metadata for the created secret.
+// ExternalSecretTemplate carries metadata, and optionally templated data,
+// for the created secret.
 type ExternalSecretTemplate struct {
-	Metadata struct {
+	EngineVersion string `json:"engineVersion,omitempty"`
+	Metadata      struct {
 		Labels map[string]string `json:"labels,omitempty"`
 	} `json:"metadata,omitempty"`
+	Data map[string]string `json:"data,omitempty"`
 }
 
 // ExternalSecretData maps one remote value to one key.

@@ -1,4 +1,4 @@
-# Prometheus and Grafana with the Flux GitOps dashboard and the example
+# Prometheus and Grafana with the Flux GitOps and volume sync dashboards and the example
 # alerts, for a Swarm where deploy/flux4swarm-stack.yaml runs as stack
 # flux-system:
 #   docker config create prometheus.yml deploy/monitoring/prometheus.yml
@@ -6,6 +6,7 @@
 #   docker config create grafana-datasource deploy/monitoring/grafana/provisioning/datasources/prometheus.yaml
 #   docker config create grafana-dashboards deploy/monitoring/grafana/provisioning/dashboards/flux.yaml
 #   docker config create grafana-flux-gitops deploy/monitoring/grafana/flux-gitops.json
+#   docker config create grafana-volume-sync deploy/monitoring/grafana/volume-sync.json
 #   docker stack deploy -c deploy/monitoring/monitoring-stack.yaml monitoring
 # Grafana listens on :3000 (admin/admin on first login). Prometheus shows the
 # alerts at :9090/alerts inside the stack; add an Alertmanager to send them.
@@ -37,6 +38,8 @@ services:
         target: /etc/grafana/provisioning/dashboards/flux.yaml
       - source: grafana-flux-gitops
         target: /etc/grafana/dashboards/flux-gitops.json
+      - source: grafana-volume-sync
+        target: /etc/grafana/dashboards/volume-sync.json
     volumes:
       - grafana:/var/lib/grafana
 configs:
@@ -49,6 +52,8 @@ configs:
   grafana-dashboards:
     external: true
   grafana-flux-gitops:
+    external: true
+  grafana-volume-sync:
     external: true
 networks:
   flux-system:

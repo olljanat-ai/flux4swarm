@@ -92,6 +92,30 @@ type Options struct {
 	// NoDefaultSecretEnvNames drops DefaultSecretEnvNames, so only
 	// SecretEnvNames are used; with none, all env values are exported as is.
 	NoDefaultSecretEnvNames bool
+	// VolSync exports a VolSync ReplicationDestination (restic mover) and its
+	// repository ExternalSecret next to every PersistentVolumeClaim, so data
+	// backed up with `flux4swarm volume-backup` is restored into the claim.
+	VolSync bool
+	// VolSyncEnv names the restic environment variables, besides
+	// RESTIC_REPOSITORY and RESTIC_PASSWORD, that the repository Secret
+	// carries (default DefaultVolSyncEnv).
+	VolSyncEnv []string
+	// VolSyncSchedule is a cron schedule for the restores; without it the
+	// ReplicationDestination restores once (manual trigger "initial").
+	VolSyncSchedule string
+	// VolSyncCutover exports for the final hand-over of one service: the
+	// ReplicationDestinations restore once more (manual trigger "final")
+	// and the workloads are not held at 0 replicas.
+	VolSyncCutover bool
+	// VolSyncRestoreFirst is for Kubernetes clusters built from scratch
+	// from the export, such as a nightly test cluster: the claims, their
+	// one-off restores (manual trigger "initial") and what they need go to
+	// DataDir, Flux applies DataDir first and waits for the restores, then
+	// apps/ with the workloads at their real replica counts.
+	VolSyncRestoreFirst bool
+	// Migrated names the Swarm services that have moved to Kubernetes:
+	// they are left out of apps/ (their manifests live in migrated/).
+	Migrated map[string]bool
 }
 
 // DefaultSecretEnvNames are the well-known env var name parts that hold
@@ -149,6 +173,11 @@ type Result struct {
 	// writing so that removed objects disappear.
 	Clean []string
 	Notes []string
+	// Volumes are the Swarm volumes exported as PersistentVolumeClaims.
+	Volumes []string
+	// VolumeSync is the api.LabelVolumeSyncSchedule of the service that
+	// mounts each volume, when set.
+	VolumeSync map[string]string
 	// Skipped lists the Swarm objects that were not exported, and why.
 	Skipped []Skipped
 	// Desired is the Swarm state the export renders to, for AdoptLabels.
@@ -171,11 +200,21 @@ func (s Skipped) String() string { return s.Kind + "/" + s.Name + " (" + s.Reaso
 const (
 	SkippedExcluded = "matches --exclude"
 	SkippedUnused   = "unused version of a flux4swarm managed object"
+	SkippedBackup   = "temporary object of flux4swarm volume-backup"
+	SkippedMigrated = "migrated to Kubernetes, see migrated/"
 )
 
 func (e *exporter) skipped(kind, name, reason string) {
 	e.res.Skipped = append(e.res.Skipped, Skipped{Kind: kind, Name: name, Reason: reason})
 }
+
+// DataDir is the directory, relative to the cluster directory, with the
+// claims and restores of VolSyncRestoreFirst.
+const DataDir = "data"
+
+// LayersFile, in the cluster directory, holds the Flux Kustomizations of
+// VolSyncRestoreFirst: data first, then apps.
+const LayersFile = "layers.yaml"
 
 // AppsDir is the directory, relative to the cluster directory, with the
 // application manifests.
@@ -221,6 +260,12 @@ func (o *Options) defaults() error {
 	if o.GitSecret == "" {
 		o.GitSecret = "flux-system"
 	}
+	if o.VolSyncRestoreFirst {
+		o.VolSync = true
+		if o.VolSyncSchedule != "" {
+			return fmt.Errorf("restore first restores once, when the cluster is built; it cannot be combined with a restore schedule")
+		}
+	}
 	return nil
 }
 
@@ -242,6 +287,8 @@ type exporter struct {
 	cmKeys                      map[string]string // docker config logical name -> ns/cm/key
 	cms                         map[string]*corev1.ConfigMap
 	extSecrets                  map[string]*api.ExternalSecret // ns/name
+	volsyncKeys                 map[string][]string            // ns -> remote keys of the VolSync repository secrets
+	restoreSchedule             map[string]string              // ns/claim -> restore cron from the service labels
 	placeholders                []*corev1.Secret
 	secretEnv                   []string
 	pvcs                        map[string]*corev1.PersistentVolumeClaim
@@ -255,21 +302,26 @@ func Export(ctx context.Context, c Client, o Options) (*Result, error) {
 		return nil, err
 	}
 	e := &exporter{
-		o:          o,
-		res:        &Result{Files: map[string][]byte{}, Root: o.Path},
-		set:        &api.Set{},
-		files:      map[string][]any{},
-		nsUsed:     map[string]bool{},
-		original:   map[string]swarm.ServiceSpec{},
-		workload:   map[string]*metav1.ObjectMeta{},
-		podSpecs:   map[string]*corev1.PodSpec{},
-		cmKeys:     map[string]string{},
-		cms:        map[string]*corev1.ConfigMap{},
-		extSecrets: map[string]*api.ExternalSecret{},
-		secretEnv:  o.secretEnvPatterns(),
-		pvcs:       map[string]*corev1.PersistentVolumeClaim{},
+		o:               o,
+		res:             &Result{Files: map[string][]byte{}, Root: o.Path, VolumeSync: map[string]string{}},
+		restoreSchedule: map[string]string{},
+		set:             &api.Set{},
+		files:           map[string][]any{},
+		nsUsed:          map[string]bool{},
+		original:        map[string]swarm.ServiceSpec{},
+		workload:        map[string]*metav1.ObjectMeta{},
+		podSpecs:        map[string]*corev1.PodSpec{},
+		cmKeys:          map[string]string{},
+		cms:             map[string]*corev1.ConfigMap{},
+		extSecrets:      map[string]*api.ExternalSecret{},
+		volsyncKeys:     map[string][]string{},
+		secretEnv:       o.secretEnvPatterns(),
+		pvcs:            map[string]*corev1.PersistentVolumeClaim{},
 	}
 	e.res.Clean = []string{o.Path + "/" + AppsDir}
+	if o.VolSyncRestoreFirst {
+		e.res.Clean = append(e.res.Clean, o.Path+"/"+DataDir)
+	}
 	if err := e.run(ctx, c); err != nil {
 		return nil, err
 	}
@@ -327,9 +379,30 @@ func (e *exporter) run(ctx context.Context, c Client) error {
 			allMW[k] = v
 		}
 	}
+	migratedConfigs, migratedSecrets := map[string]bool{}, map[string]bool{}
 	for _, s := range services {
 		if e.o.skip(s.Spec.Name) {
 			e.skipped(swarmapply.KindService, s.Spec.Name, SkippedExcluded)
+			continue
+		}
+		if _, ok := s.Spec.Labels[api.LabelVolumeBackup]; ok {
+			e.skipped(swarmapply.KindService, s.Spec.Name, SkippedBackup)
+			continue
+		}
+		if e.o.Migrated[s.Spec.Name] {
+			e.skipped(swarmapply.KindService, s.Spec.Name, SkippedMigrated)
+			// Keep the namespace (and its SecretStore) that the migrated
+			// manifests still live in.
+			ns, _ := splitNS(s.Spec.Name, s.Spec.Labels)
+			e.nsUsed[ns] = true
+			if cs := s.Spec.TaskTemplate.ContainerSpec; cs != nil {
+				for _, r := range cs.Configs {
+					migratedConfigs[r.ConfigID] = true
+				}
+				for _, r := range cs.Secrets {
+					migratedSecrets[r.SecretID] = true
+				}
+			}
 			continue
 		}
 		if err := e.service(s, netNames, configByID, secretByID, allMW); err != nil {
@@ -340,7 +413,7 @@ func (e *exporter) run(ctx context.Context, c Client) error {
 	for _, cf := range configs {
 		cf := configByID[cf.ID]
 		name := logicalName(cf.Spec.Name, cf.Spec.Labels)
-		if _, done := e.cmKeys[name]; done {
+		if _, done := e.cmKeys[name]; done || migratedConfigs[cf.ID] {
 			continue
 		}
 		if e.o.skip(name) {
@@ -368,6 +441,10 @@ func (e *exporter) run(ctx context.Context, c Client) error {
 			e.skipped(swarmapply.KindSecret, s.Spec.Name, SkippedExcluded)
 			continue
 		}
+		if _, ok := s.Spec.Labels[api.LabelVolumeBackup]; ok {
+			e.skipped(swarmapply.KindSecret, s.Spec.Name, SkippedBackup)
+			continue
+		}
 		if s.Spec.Labels[api.LabelName] != "" {
 			if !usedSecrets[s.ID] {
 				e.skipped(swarmapply.KindSecret, s.Spec.Name, SkippedUnused)
@@ -375,6 +452,10 @@ func (e *exporter) run(ctx context.Context, c Client) error {
 			continue
 		}
 		ns, short := splitNS(name, s.Spec.Labels)
+		if _, done := e.extSecrets[ns+"/"+dnsName(short)]; migratedSecrets[s.ID] && !done {
+			// Only used by migrated services: it lives in migrated/.
+			continue
+		}
 		e.externalSecret(ns, dnsName(short), name, s.Spec.Labels)
 	}
 	if err := e.roundTrip(); err != nil {
@@ -541,9 +622,8 @@ func (e *exporter) service(s swarm.Service, netNames map[string]string, configs 
 				e.note("service %s: templated volume %q is kept in the %s annotation", spec.Name, m.Source, api.AnnotationServiceSpec)
 				continue
 			}
-			vns, vshort := splitVolumeNS(m.Source, ns)
-			claim := dnsName(vshort)
-			if translate.SwarmName(vns, claim) != m.Source || vns != ns {
+			claim, ok := volumeClaim(ns, m.Source)
+			if !ok {
 				e.note("service %s: volume %q cannot keep its name in namespace %s; kept in the %s annotation", spec.Name, m.Source, ns, api.AnnotationServiceSpec)
 				continue
 			}
@@ -554,7 +634,16 @@ func (e *exporter) service(s swarm.Service, netNames map[string]string, configs 
 			}
 			pod.Volumes = appendVolume(pod.Volumes, corev1.Volume{Name: claim, VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim}}})
+			if _, ok := e.restoreSchedule[ns+"/"+claim]; !ok {
+				e.restoreSchedule[ns+"/"+claim] = restoreSchedule(spec.Labels)
+			}
+			if v := strings.TrimSpace(spec.Labels[api.LabelVolumeSyncSchedule]); v != "" {
+				e.res.VolumeSync[m.Source] = v
+			}
 			e.pvc(ns, claim, m.VolumeOptions)
+			if !contains(e.res.Volumes, m.Source) {
+				e.res.Volumes = append(e.res.Volumes, m.Source)
+			}
 		case mount.TypeBind:
 			pod.Volumes = append(pod.Volumes, corev1.Volume{Name: vname, VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: m.Source}}})
 		case mount.TypeTmpfs:
@@ -665,6 +754,18 @@ func (e *exporter) service(s swarm.Service, netNames map[string]string, configs 
 		if r := spec.Mode.Replicated; r != nil && r.Replicas != nil {
 			n := int32(*r.Replicas)
 			d.Spec.Replicas = &n
+			if n > 0 && e.held(tpl.Spec) {
+				// Kubernetes waits for the data: the restore and the
+				// application must not use the claim at the same time.
+				// The round trip keeps the Swarm replicas in the
+				// service-spec annotation.
+				zero := int32(0)
+				d.Spec.Replicas = &zero
+				if d.Annotations == nil {
+					d.Annotations = map[string]string{}
+				}
+				d.Annotations[api.AnnotationHeld] = strconv.Itoa(int(n))
+			}
 		}
 		if uc := spec.UpdateConfig; uc != nil && uc.Order == swarm.UpdateOrderStartFirst && uc.Parallelism == 1 {
 			d.Spec.Strategy = appsv1.DeploymentStrategy{Type: appsv1.RollingUpdateDeploymentStrategyType}
@@ -980,10 +1081,21 @@ func (e *exporter) pvc(ns, name string, vo *mount.VolumeOptions) {
 			p.Labels = l
 		}
 	}
+	if e.o.VolSync {
+		// The claim holds the migrated data: Flux must never delete it,
+		// not even when it moves from apps/ to migrated/ at cutover.
+		if p.Annotations == nil {
+			p.Annotations = map[string]string{}
+		}
+		p.Annotations["kustomize.toolkit.fluxcd.io/prune"] = "disabled"
+	}
 	e.pvcs[ns+"/"+name] = p
 	e.add(e.nsDir(ns)+"/persistentvolumeclaim-"+name+".yaml", p)
 	e.set.PVCs = append(e.set.PVCs, p)
 	e.notes = appendOnce(e.notes, "PersistentVolumeClaims request a placeholder size of 1Gi; set the real size and storageClassName for Kubernetes.")
+	if e.o.VolSync {
+		e.volsync(ns, name)
+	}
 }
 
 // roundTrip renders the exported manifests back to Swarm specs and stores
@@ -1115,6 +1227,10 @@ func (e *exporter) write() error {
 			storeKeys[es.Metadata.Namespace] = append(storeKeys[es.Metadata.Namespace], d.RemoteRef.Key)
 		}
 	}
+	for ns, keys := range e.volsyncKeys {
+		needStore[ns] = true
+		storeKeys[ns] = append(storeKeys[ns], keys...)
+	}
 	clusterStoreWritten := false
 	for _, ns := range nss {
 		dir := e.nsDir(ns)
@@ -1159,15 +1275,28 @@ func (e *exporter) write() error {
 		}
 	}
 
+	if e.o.VolSyncRestoreFirst {
+		e.splitData()
+	}
+
 	// Per-directory kustomization.yaml files.
 	dirs := map[string][]string{}
 	for f := range e.files {
 		dirs[path.Dir(f)] = append(dirs[path.Dir(f)], path.Base(f))
 	}
 	appsRoot := e.o.Path + "/" + AppsDir
-	var appDirs []string
+	dataRoot := e.o.Path + "/" + DataDir
+	var appDirs, dataDirs []string
 	for d, files := range dirs {
 		if d == appsRoot {
+			continue
+		}
+		if strings.HasPrefix(d, dataRoot+"/") {
+			sort.Strings(files)
+			if err := e.render(d+"/kustomization.yaml", kustomization(files)); err != nil {
+				return err
+			}
+			dataDirs = append(dataDirs, strings.TrimPrefix(d, dataRoot+"/"))
 			continue
 		}
 		sort.Strings(files)
@@ -1187,6 +1316,21 @@ func (e *exporter) write() error {
 	}
 	if err := e.render(appsRoot+"/kustomization.yaml", kustomization(rootRes)); err != nil {
 		return err
+	}
+	if e.o.VolSyncRestoreFirst {
+		sort.Strings(dataDirs)
+		dataRes := append([]string(nil), dirs[dataRoot]...)
+		sort.Strings(dataRes)
+		dataRes = append(dataRes, dataDirs...)
+		if dataRes == nil {
+			dataRes = []string{}
+		}
+		if err := e.render(dataRoot+"/kustomization.yaml", kustomization(dataRes)); err != nil {
+			return err
+		}
+		if err := e.layers(); err != nil {
+			return err
+		}
 	}
 	for f, objs := range e.files {
 		if err := e.render(f, objs...); err != nil {
@@ -1413,6 +1557,28 @@ func splitNS(name string, labels map[string]string) (string, string) {
 		return dnsName(ns), strings.TrimPrefix(name, ns+"_")
 	}
 	return api.SwarmNamespace, name
+}
+
+// VolumeClaim returns the namespace and PersistentVolumeClaim name that
+// import gives the named Swarm volume source when service svc mounts it, or
+// ok false when import keeps the mount only in the service-spec annotation
+// (templated, external or foreign volumes).
+func VolumeClaim(svc swarm.Service, source string) (ns, claim string, ok bool) {
+	ns, _ = splitNS(svc.Spec.Name, svc.Spec.Labels)
+	claim, ok = volumeClaim(ns, source)
+	return ns, claim, ok
+}
+
+func volumeClaim(ns, source string) (string, bool) {
+	if source == "" || strings.Contains(source, "{{") {
+		return "", false
+	}
+	vns, vshort := splitVolumeNS(source, ns)
+	claim := dnsName(vshort)
+	if translate.SwarmName(vns, claim) != source || vns != ns {
+		return "", false
+	}
+	return claim, true
 }
 
 func splitVolumeNS(source, ns string) (string, string) {

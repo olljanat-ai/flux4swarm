@@ -302,6 +302,12 @@ the layout shown in the README. For each service it:
    `flux4swarm.io/spec-hash` labels to each live service whose rendered spec
    matches, so the first reconcile is a no-op.
 
+With `--volsync` every PVC also gets a VolSync ReplicationDestination and
+the ExternalSecret of its restic repository; `flux4swarm volume-backup`
+(`internal/volumebackup`) fills that repository from the Swarm volume with a
+one-off replicated-job service. See
+[kubernetes-and-swarm.md](kubernetes-and-swarm.md#moving-volume-data-restic--volsync).
+
 Secret values are not readable from Docker; the generated SecretStore
 (`vault`, `azurekv` or `fake` template) and ExternalSecrets name the keys
 to fill in. Output goes to `--output` or is committed and pushed to

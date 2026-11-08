@@ -123,6 +123,8 @@ clusters/prod/
   flux-system/            # created once by --bootstrap, then yours (flux bootstrap may rewrite it)
   apps/                   # owned by import --watch: regenerated on every Swarm change, do not edit
   MIGRATION.md            # owned by import --watch: what still blocks each service on Kubernetes
+  migrated/               # with --migrate: one directory per service cut over, written once, then yours
+  data/, layers.yaml      # with --volsync-restore-first: claims and restores (owned), Flux layers (written once)
   platform/               # owned by the platform team: Kubernetes-only objects
   kustomization.yaml      # owned by the platform team: ties it together and patches apps/
 ```
@@ -192,6 +194,297 @@ service from Swarm, or keep it on Swarm and `--exclude` it from the export.
 The next export drops it from `apps/`, and Flux keeps the copy you own.
 When everything has moved, stop `import --watch`; the repository is then an
 ordinary Flux repository.
+
+### Moving volume data (restic + VolSync)
+
+Manifests move with Git; the data in Swarm volumes does not. flux4swarm
+copies it with two standard tools instead of a mover of its own:
+[restic](https://restic.net) on the Swarm side and
+[VolSync](https://volsync.readthedocs.io)'s restic mover on Kubernetes,
+with an S3 compatible bucket (or any restic repository) in between. The
+two clusters never talk to each other.
+
+1. Export with `--volsync`. Next to every PersistentVolumeClaim, import
+   writes a VolSync `ReplicationDestination` (restic mover, `copyMethod:
+   Direct` into the claim, `enableFileDeletion: true`) and an
+   ExternalSecret `<claim>-volsync-restic` with the repository settings.
+   Both carry `swarm.flux4swarm.io/ignore: "true"`, so Swarm ignores them.
+   The cluster needs VolSync installed. In the secret store, put the base
+   repository under `volsync-restic-repository` (for example
+   `s3:https://s3.example.com/migration/prod`), the restic password under
+   `volsync-restic-password` and the S3 credentials under
+   `volsync-aws-access-key-id` / `volsync-aws-secret-access-key` (all after
+   `--secret-key-prefix`; `--volsync-env` changes the credential variables).
+   Each claim gets its own repository, `<base>/<namespace>/<claim>`.
+2. The export keeps every workload that mounts a claim at 0 replicas on
+   Kubernetes (annotation `flux4swarm.io/held-replicas` keeps the Swarm
+   count) until it is cut over: the restore and the application must not
+   use the claim at the same time.
+3. Copy the data from Swarm with the same settings in the environment:
+
+   ```sh
+   export RESTIC_REPOSITORY=s3:https://s3.example.com/migration/prod
+   export RESTIC_PASSWORD=... AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+   flux4swarm volume-backup shop_db shop_uploads
+   ```
+
+   For each volume it starts a one-off replicated-job service that mounts
+   the volume exactly like the service that uses it (same driver and
+   options, so NFS/CIFS options, old volume plugins and cluster volumes all
+   work) read-only at `/data`, on the node where that service runs or last
+   ran, and runs `restic backup --host volsync .` there, which is the
+   layout VolSync's own backups have. The job and its temporary secret are
+   removed afterwards, and import skips them. `--node` picks the node when
+   it cannot be found (a service scaled to 0 on a multi-node Swarm), and
+   `--network` attaches the job to a network, for example to reach a
+   repository server on the Swarm.
+4. The `initial` manual trigger restores the newest snapshot once. Backups
+   are incremental, so run `volume-backup` while the service runs to
+   pre-seed, then at cutover stop the service, run it again and change the
+   trigger (patch `spec.trigger.manual` of the ReplicationDestination) for
+   the final restore. Then scale the workload up on Kubernetes. With
+   `import --watch`, let `--migrate` do this (see
+   [Automated](#automated-sync-and-cutover-with-import---watch)).
+
+#### Large volumes: sync continuously, cut over in minutes
+
+For large volumes, keep both sides in sync for as long as the service runs
+on Swarm (weeks, if needed), so the cutover only moves the last changes:
+
+* `flux4swarm volume-backup --every 15m shop_db` starts a long-running
+  sync service, `flux4swarm-sync-<namespace>-<claim>`, instead of a
+  one-off job. It runs an incremental `restic backup` every interval. Its
+  restic cache stays in the container between rounds, so a round only reads
+  file metadata and uploads what changed. Every `--keep` rounds (default
+  24) it forgets snapshots older than the last `--keep` and prunes the
+  repository. Running it again replaces the service. `--stop` removes it.
+  Follow it with `docker service logs -f flux4swarm-sync-shop-db`.
+* `import --volsync --volsync-schedule '*/15 * * * *'` writes the
+  ReplicationDestinations with that cron schedule instead of the manual
+  trigger. Each restore downloads only what changed, skips files that are
+  already right and, with `enableFileDeletion`, deletes files that are gone
+  on Swarm. The claim then trails the Swarm volume by about one interval
+  on each side. Keep the workload at 0 replicas on Kubernetes the whole
+  time.
+
+These copies come from a running service, so they are not consistent
+snapshots. They are only there to make the final copy small. Cutover:
+
+1. Take the workload over in Git (copy its manifests out of `apps/`, see
+   above). In the copy you own, replace the ReplicationDestination's
+   trigger with `manual: final`. That stops the schedule and starts one
+   restore when you apply it, so don't apply it yet.
+2. Stop the service on Swarm (`docker service scale shop_db=0`) and wait
+   until its tasks are gone. Downtime starts here.
+3. `flux4swarm volume-backup shop_db` (no `--every`): it removes the sync
+   service and backs up the final increment with the writer stopped. It
+   warns if a task still runs.
+4. Commit the `manual: final` trigger and wait for the restore:
+   `kubectl -n shop wait replicationdestination/db --for=jsonpath='{.status.lastManualSync}'=final`.
+5. Scale the workload up on Kubernetes and switch traffic. Downtime ends
+   here.
+
+After the cutover, remove the ReplicationDestination, or leave it on the
+manual trigger. A scheduled restore that runs after the cutover would
+replace the data written on Kubernetes since then with the last Swarm copy.
+
+Downtime is one incremental backup, one incremental restore and the start
+of the application. Each of those depends on how much changed since the
+last round and on how many files there are, not on the volume size. A
+restore with VolSync also reads the files already in the claim to check
+them, so measure the restore on the real volume before you plan the
+window. Restores and backups can run at the same time. While a sync
+service prunes, a restore that starts fails and VolSync retries it.
+
+A file copy of a database is only consistent when the database is
+stopped. For a short cutover window, use the database's own replication
+or dump tools instead, and use `volume-backup` for file data.
+
+### Automated sync and cutover with import --watch
+
+`import --watch` can run all of the above on its own, so moving a Swarm
+service by service is a label per service:
+
+```sh
+export RESTIC_REPOSITORY=s3:https://s3.example.com/migration/prod
+export RESTIC_PASSWORD=... AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+flux4swarm import --watch --cluster prod --bootstrap \
+  --git-url https://github.com/acme/fleet \
+  --volsync-sync 15m --migrate
+```
+
+* `--volsync-sync 15m` (implies `--volsync`) keeps a sync service running
+  for every exported volume, starting the missing ones after each export,
+  and writes the ReplicationDestinations with a matching restore schedule
+  (`*/15 * * * *` here; `--volsync-schedule` overrides it). The restic
+  settings come from the environment of the watcher, the same values the
+  secret store holds for Kubernetes. Run the watcher on a manager with
+  access to the repository. A sync service whose interval, schedule or
+  restic settings no longer match is replaced.
+* Very large volumes can be copied outside business hours instead: give
+  `--volsync-sync` a 5-field cron schedule in UTC, or put the label
+  `flux4swarm.io/volume-sync-schedule` on the Swarm services that need it.
+  The label takes a duration or a cron schedule and overrides the flag for
+  that service's volumes. With only `--volsync`, sync services run just for
+  the labelled services.
+
+  ```sh
+  # Weeknights at 01:00 UTC; restores on Kubernetes at 05:00 UTC.
+  docker service update \
+    --label-add 'flux4swarm.io/volume-sync-schedule=0 1 * * 1-5' \
+    --label-add 'flux4swarm.io/volume-restore-schedule=0 5 * * 1-5' erp_db
+  ```
+
+  In cron mode the sync service runs busybox `crond` in the restic image.
+  A round that is still running when the next one is due is skipped, not
+  doubled. The restores follow the label `flux4swarm.io/volume-restore-schedule`.
+  Without it they run on the same cron as the backups and so restore the
+  previous round. Leave the backup enough time and schedule the restore
+  after it. `flux4swarm_volume_sync_interval_seconds` is then the longest
+  gap of the schedule (Friday to Monday above), so the "behind" alert
+  allows for it. `volume-backup --schedule '0 1 * * *'` starts the same
+  kind of service by hand.
+* `--migrate` watches for the label `flux4swarm.io/migrate=kubernetes`
+  on Swarm services. Put it on with
+  `docker service update --label-add flux4swarm.io/migrate=kubernetes shop_db`
+  (or in `deploy.labels` of the stack file). At the next export the watcher:
+
+  1. exports the service as it runs, with a final restore (manual trigger
+     `final`) for each of its claims,
+  2. scales it to 0 on Swarm and waits until its tasks are gone,
+  3. backs up the last increment of each volume (this also removes the
+     sync service),
+  4. moves it out of `apps/` into `migrated/<namespace>/<name>/`, with two
+     Flux Kustomizations: `migrate-<namespace>-<name>-restore` (the claims
+     and their final restore, Ready when the restore has run, never pruned)
+     and `migrate-<namespace>-<name>-app` (the workload at its real replica
+     count, `dependsOn` the restore), and commits.
+
+  Flux then restores the last increment and starts the workload. Downtime
+  is the time from step 2 until the workload is ready on Kubernetes.
+  Services without volumes move the same way, without the restore.
+  Global and job services can't be stopped by scaling, so they are refused.
+  A failed cutover (for example a backup error) is logged and retried at
+  the next export. A service with volumes is never stopped when the export
+  has no `--volsync` or no restic settings.
+
+`migrated/` is the record of what has moved: a migrated service stays out
+of `apps/`, and the watcher scales it back to 0 if anything starts it on
+Swarm again (a `docker stack deploy` of the old stack file, for example)
+and logs a warning. Everything in `migrated/<namespace>/<name>/` is written
+once and is yours from then on. `migrated/kustomization.yaml` is rewritten
+on every export. Without a root `kustomization.yaml` Flux picks `migrated/`
+up by itself. If you have one, add `migrated` to its resources; the watcher
+warns until you do.
+
+#### Checking that a cutover finished
+
+The watcher logs every step with the service name:
+
+| Log message | Meaning |
+|-------------|---------|
+| `migration 1/4: started` | the label was found; replica count and target directory |
+| `migration 2/4: stopped on Swarm` | all tasks are gone; `downtime_started` |
+| `migration 3/4: final backup done` | one line per volume, with its repository |
+| `migration 4/4: handed over to Kubernetes in Git` | the manifests are ready; `swarm_downtime` so far |
+| `migration done: handed over to Kubernetes` | committed and pushed; `commit` is the Git commit |
+| `migration failed; retried at the next export` | with `error`; the service may be stopped on Swarm meanwhile |
+| `migration not in Git yet` | the push failed; the service stays stopped and the hand-over is pushed again |
+| `migration: migrated service was started on Swarm again; scaling it back to 0` | something started it on Swarm |
+| `volume sync: sync service started` | `--volsync-sync` started a sync service for a volume |
+
+The commit message starts with `Migrate <service> to Kubernetes`.
+`migrated/<namespace>/<name>/MIGRATED.md` records the replica count and
+the time of every step, and lists the commands to check Kubernetes:
+
+```sh
+flux get kustomization -n flux-system migrate-shop-db-restore   # Ready = final restore done
+kubectl -n shop get replicationdestinations -o custom-columns=NAME:.metadata.name,LAST:.status.lastManualSync,RESULT:.status.latestMoverStatus.result
+flux get kustomization -n flux-system migrate-shop-db-app       # Ready = workload running
+```
+
+The cutover is finished when the `-app` Kustomization is Ready. The
+watcher's `/metrics` and the
+[volume sync dashboard](monitoring.md#volume-sync-and-migration) show the
+sync services and the cutovers too.
+
+#### Roll back a migrated service
+
+`MIGRATED.md` of each service has these steps with its names filled in:
+
+1. Remove the label, so the service is not cut over again:
+   `docker service update --label-rm flux4swarm.io/migrate --label-rm flux4swarm.io/migrate-replicas shop_db`,
+   and drop it from `deploy.labels` in the stack file.
+2. Stop it on Kubernetes:
+   `flux suspend kustomization -n flux-system migrate-shop-db-app` and
+   `kubectl -n shop scale deployment/db --replicas 0`.
+3. Only if the data written on Kubernetes since the cutover must be kept:
+   back the claim up to the same repository with a VolSync
+   ReplicationSource, then restore it into the Swarm volume.
+
+   ```yaml
+   apiVersion: volsync.backube/v1alpha1
+   kind: ReplicationSource
+   metadata:
+     name: db-rollback
+     namespace: shop
+   spec:
+     sourcePVC: db
+     trigger:
+       manual: rollback
+     restic:
+       repository: db-volsync-restic   # the repository secret of the claim
+       copyMethod: Direct
+       retain:
+         last: 10
+   ```
+
+   `kubectl -n shop wait replicationsource/db-rollback --for=jsonpath='{.status.lastManualSync}'=rollback`,
+   then on Swarm `flux4swarm volume-backup --restore shop_db`. It runs a
+   job like the backup, with the volume mounted read-write, restores the
+   newest snapshot and deletes the files that are not in it. It refuses
+   to run while a service using the volume runs.
+4. Delete `migrated/shop/db/` from Git. Flux removes the workload and its
+   Kustomizations. The claims stay because pruning is off for them. The
+   next export brings the service back to `apps/` (held at 0 on
+   Kubernetes again) and stops keeping it at 0 on Swarm.
+5. `docker service scale shop_db=<replicas>`. With `--volsync-sync` the
+   sync service starts again at the next export.
+
+### Nightly test clusters from the live Swarm
+
+A Kubernetes cluster that is rebuilt every night from the latest Swarm
+configuration and data gives long test periods with almost current data,
+while production stays on Swarm. Export it as a cluster of its own, with
+the sync services running all the time:
+
+```sh
+flux4swarm import --watch --cluster nightly --bootstrap \
+  --git-url https://github.com/acme/fleet \
+  --volsync-sync 1h --volsync-restore-first
+```
+
+`--volsync-restore-first` (implies `--volsync`) is for a cluster built from
+scratch from the export:
+
+* the claims, their ReplicationDestinations (manual trigger `initial`: one
+  restore when the cluster is built), their repository ExternalSecrets and
+  the namespaces and secret stores they need go to `clusters/nightly/data/`,
+* `clusters/nightly/layers.yaml` has two Flux Kustomizations: `data`
+  (waits until every restore has run, never pruned) and `apps` (the
+  workloads at their real replica counts, `dependsOn` data), and
+  `clusters/nightly/kustomization.yaml` lists `flux-system` and
+  `layers.yaml`, so the root reads only those two.
+
+Every rebuild (`flux bootstrap` against `clusters/nightly`, with VolSync,
+External Secrets and the secret store set up) then restores the newest
+backups, at most one sync interval old, and starts the applications on top.
+Configuration changes on Swarm keep flowing into `apps/` during the day.
+The data is restored only once per build, so tests are not disturbed by
+it. To refresh the data without a rebuild, delete the ReplicationDestinations
+and let Flux create them again. It can't be combined with
+`--volsync-schedule` or `--merge`. Several watchers can share the Swarm: a
+volume has one sync service, which every cluster restores from.
 
 ## Several environments: one shared base
 
