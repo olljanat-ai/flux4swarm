@@ -72,6 +72,29 @@ daemon. Its flannel VXLAN uses UDP 8472, Swarm's overlay uses UDP 4789, so
 they do not clash. The `local-path` StorageClass is the default: PVCs bind
 when the first pod (here the VolSync mover) uses them.
 
+If github.com is unreachable (the K3s installer downloads the binary from
+GitHub releases), take K3s from its image on Docker Hub instead. The image
+ships the bare `k3s` binary, with containerd, runc and the CNI plugins next
+to it in `/bin`, so copy those too and put them first on the service's
+`PATH` (not the busybox tools in the same directory):
+
+```sh
+V=v1.37.2-k3s1
+cid=$(docker create rancher/k3s:$V)
+sudo mkdir -p /opt/k3s/bin && docker export $cid | sudo tar -x -C /opt/k3s bin && docker rm $cid
+sudo install -m 0755 /opt/k3s/bin/k3s /usr/local/bin/k3s
+sudo mkdir -p /opt/k3s/k3sbin && cd /opt/k3s/k3sbin
+for f in cni containerd-shim-runc-v2 runc conntrack ipset fuse-overlayfs slirp4netns; do sudo cp -a ../bin/$f .; done
+for f in bandwidth bridge firewall flannel host-local loopback portmap; do sudo ln -sf cni $f; done
+sudo ln -sf /usr/local/bin/k3s containerd && cd -
+curl -sfL https://get.k3s.io | sudo INSTALL_K3S_SKIP_DOWNLOAD=true \
+  INSTALL_K3S_EXEC="--disable traefik --disable servicelb --write-kubeconfig-mode 0644" sh -
+echo 'PATH=/opt/k3s/k3sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' | sudo tee -a /etc/systemd/system/k3s.service.env
+sudo systemctl daemon-reload && sudo systemctl restart k3s
+```
+
+Use `kubectl` (a symlink to `k3s`), not `k3s kubectl`, with this binary.
+
 ## 4. Tools and cluster add-ons
 
 ```sh
@@ -90,6 +113,23 @@ helm repo add external-secrets https://charts.external-secrets.io
 helm repo add backube https://backube.github.io/helm-charts/
 helm install external-secrets external-secrets/external-secrets -n external-secrets --create-namespace --wait
 helm install volsync backube/volsync -n volsync-system --create-namespace --wait
+
+# VolSync needs the VolumeSnapshot CRDs, which K3s does not ship. Without
+# them it never reconciles a ReplicationDestination (no status at all).
+B=https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/v8.7.0/client/config/crd
+for c in volumesnapshotclasses volumesnapshotcontents volumesnapshots; do
+  kubectl apply -f $B/snapshot.storage.k8s.io_$c.yaml
+done
+kubectl -n volsync-system rollout restart deploy/volsync
+```
+
+Without github.com: the Flux CLI is in `ghcr.io/fluxcd/flux-cli:<version>`
+(`/usr/local/bin/flux`), and the ESO chart is also published as
+`oci://ghcr.io/external-secrets/charts/external-secrets`:
+
+```sh
+helm install external-secrets oci://ghcr.io/external-secrets/charts/external-secrets \
+  -n external-secrets --create-namespace --wait
 ```
 
 `make e2e` downloads its own pinned kind, kubectl, flux and helm into

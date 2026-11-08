@@ -33,6 +33,10 @@ type Fake struct {
 	Calls []string
 	// UpdateErr, when set, is returned by ServiceUpdate.
 	UpdateErr error
+	// BeforeServiceUpdate, when set, is called (with the fake locked) at
+	// the start of ServiceUpdate with the stored service, which it may
+	// change, e.g. to bump its version like a finished rolling update.
+	BeforeServiceUpdate func(s *swarm.Service)
 
 	seq int
 }
@@ -157,6 +161,10 @@ func (f *Fake) ServiceUpdate(_ context.Context, id string, v swarm.Version, spec
 	for i, s := range f.Services {
 		if s.ID != id {
 			continue
+		}
+		if f.BeforeServiceUpdate != nil {
+			f.BeforeServiceUpdate(&f.Services[i])
+			s = f.Services[i]
 		}
 		if s.Version != v {
 			return swarm.ServiceUpdateResponse{}, errors.New("update out of sequence")

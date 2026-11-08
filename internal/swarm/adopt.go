@@ -6,6 +6,7 @@ package swarm
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/docker/docker/api/types/swarm"
 
@@ -70,24 +71,50 @@ func (a *Applier) AdoptLabels(ctx context.Context, d Desired) ([]Change, error) 
 			res.add(KindService, s.Name, Unchanged, "not relabelled: "+err.Error())
 			continue
 		}
-		spec, err := deepCopy(cur.Spec)
+		reason, err := a.relabel(ctx, cur, want)
 		if err != nil {
-			return nil, err
+			return res.Changes, fmt.Errorf("relabel service %s: %w", s.Name, err)
 		}
-		spec.Labels = merge(spec.Labels, a.Owner.Labels(), map[string]string{api.LabelSpecHash: want.Labels[api.LabelSpecHash]})
-		if reason := drift(spec, want); reason != "" {
+		if reason != "" {
 			res.add(KindService, s.Name, Unchanged, "not relabelled: "+reason)
 			continue
-		}
-		if !a.DryRun {
-			// No registry query: the image (and its pinned digest) stays as is.
-			if _, err := a.Client.ServiceUpdate(ctx, cur.ID, cur.Version, spec, swarm.ServiceUpdateOptions{}); err != nil {
-				return res.Changes, fmt.Errorf("relabel service %s: %w", s.Name, err)
-			}
 		}
 		res.add(KindService, s.Name, Configured, "adopted (labels only)")
 	}
 	return res.Changes, nil
+}
+
+// relabelAttempts bounds the retries of a relabel that lost a race.
+const relabelAttempts = 5
+
+// relabel adds the owner and spec-hash labels of want to cur, or returns
+// why it would still drift. A service that finished a rolling update since
+// it was listed has a newer version (Swarm records the update status in
+// the service object) and the update is refused as out of sequence; it is
+// then inspected again and, if it still matches, relabelled at its new
+// version.
+func (a *Applier) relabel(ctx context.Context, cur swarm.Service, want swarm.ServiceSpec) (string, error) {
+	for attempt := 1; ; attempt++ {
+		spec, err := deepCopy(cur.Spec)
+		if err != nil {
+			return "", err
+		}
+		spec.Labels = merge(spec.Labels, a.Owner.Labels(), map[string]string{api.LabelSpecHash: want.Labels[api.LabelSpecHash]})
+		if reason := drift(spec, want); reason != "" {
+			return reason, nil
+		}
+		if a.DryRun {
+			return "", nil
+		}
+		// No registry query: the image (and its pinned digest) stays as is.
+		_, err = a.Client.ServiceUpdate(ctx, cur.ID, cur.Version, spec, swarm.ServiceUpdateOptions{})
+		if err == nil || attempt == relabelAttempts || !strings.Contains(err.Error(), "update out of sequence") {
+			return "", err
+		}
+		if cur, _, err = a.Client.ServiceInspectWithRaw(ctx, cur.ID, swarm.ServiceInspectOptions{}); err != nil {
+			return "", err
+		}
+	}
 }
 
 func (a *Applier) adoptBlocker(s *Service, configs map[string]versioned, desiredSecrets map[string]bool) string {

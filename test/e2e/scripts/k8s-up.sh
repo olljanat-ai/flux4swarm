@@ -70,10 +70,18 @@ install_flux() {
   local tmp v="${FLUX_VERSION#v}"; tmp="$(mktemp -d)"
   local base="https://github.com/fluxcd/flux2/releases/download/$FLUX_VERSION"
   local tgz="flux_${v}_linux_${ARCH}.tar.gz"
-  fetch "$base/$tgz" "$tmp/$tgz"
-  fetch "$base/flux_${v}_checksums.txt" "$tmp/sums"
-  sha256_check "$tmp/$tgz" "$(awk -v f="$tgz" '$2==f {print $1}' "$tmp/sums")"
-  tar -xzf "$tmp/$tgz" -C "$tmp" flux
+  if fetch "$base/$tgz" "$tmp/$tgz" && fetch "$base/flux_${v}_checksums.txt" "$tmp/sums"; then
+    sha256_check "$tmp/$tgz" "$(awk -v f="$tgz" '$2==f {print $1}' "$tmp/sums")"
+    tar -xzf "$tmp/$tgz" -C "$tmp" flux
+  else
+    # `go install` would build a flux without its embedded install manifests,
+    # so copy the release binary out of the official CLI image instead.
+    echo ">> GitHub download failed; copying flux from ghcr.io/fluxcd/flux-cli:$FLUX_VERSION"
+    local cid
+    cid="$(docker create --platform "linux/$ARCH" "ghcr.io/fluxcd/flux-cli:$FLUX_VERSION")"
+    docker cp "$cid:/usr/local/bin/flux" "$tmp/flux"
+    docker rm "$cid" >/dev/null
+  fi
   install -m 0755 "$tmp/flux" "$E2E_BIN_DIR/flux"
   rm -rf "$tmp"
 }
@@ -110,7 +118,11 @@ FLUX_MANIFESTS="$E2E_STATE_DIR/flux-install.yaml"
 flux install --export --components "$FLUX_COMPONENTS" >"$FLUX_MANIFESTS"
 
 ESO_CHART="$E2E_STATE_DIR/external-secrets-$ESO_CHART_VERSION.tgz"
-fetch "$ESO_CHART_URL" "$ESO_CHART"
+if ! fetch "$ESO_CHART_URL" "$ESO_CHART"; then
+  # The same tarball is published as an OCI chart; the checksum below still applies.
+  echo ">> chart download failed; pulling oci://ghcr.io/external-secrets/charts/external-secrets:$ESO_CHART_VERSION"
+  helm pull oci://ghcr.io/external-secrets/charts/external-secrets --version "$ESO_CHART_VERSION" -d "$E2E_STATE_DIR"
+fi
 [ -z "$ESO_CHART_SHA256" ] || sha256_check "$ESO_CHART" "$ESO_CHART_SHA256"
 ESO_VALUES=(--set installCRDs=true)
 ESO_IMAGES="$(helm template external-secrets "$ESO_CHART" --namespace external-secrets "${ESO_VALUES[@]}" | images_in)"
@@ -177,7 +189,24 @@ flux check --components "$FLUX_COMPONENTS" >/dev/null 2>&1 || flux check --compo
 
 echo ">> installing Gateway API CRDs $GATEWAY_API_VERSION (standard channel)"
 gw="$E2E_STATE_DIR/gateway-api-standard-install.yaml"
-fetch "https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml" "$gw"
+if ! fetch "https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml" "$gw"; then
+  # Rebuild the release file the way hack/build-install-yaml.sh does, from the
+  # Go module zip (proxy.golang.org); the checksum below still applies.
+  echo ">> GitHub download failed; rebuilding standard-install.yaml from the Go module proxy"
+  gwtmp="$(mktemp -d)"
+  fetch "https://proxy.golang.org/sigs.k8s.io/gateway-api/@v/$GATEWAY_API_VERSION.zip" "$gwtmp/gw.zip"
+  python3 -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$gwtmp/gw.zip" "$gwtmp"
+  (
+    cd "$gwtmp/sigs.k8s.io/gateway-api@$GATEWAY_API_VERSION"
+    sed "s/YEAR/$(date +%Y)/g" hack/boilerplate/boilerplate.sh.txt
+    printf '#\n# Gateway API Standard channel install\n#\n'
+    for f in config/crd/standard/gateway*.yaml; do
+      printf -- '---\n#\n# %s\n#\n' "$f"
+      cat "$f"
+    done
+  ) >"$gw"
+  rm -rf "$gwtmp"
+fi
 [ -z "$GATEWAY_API_SHA256" ] || sha256_check "$gw" "$GATEWAY_API_SHA256"
 kubectl apply --server-side -f "$gw" >/dev/null
 kubectl wait --for condition=Established --timeout 60s crd/httproutes.gateway.networking.k8s.io crd/gateways.gateway.networking.k8s.io >/dev/null
