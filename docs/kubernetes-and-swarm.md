@@ -193,6 +193,60 @@ The next export drops it from `apps/`, and Flux keeps the copy you own.
 When everything has moved, stop `import --watch`; the repository is then an
 ordinary Flux repository.
 
+### Moving volume data (restic + VolSync)
+
+Manifests move with Git; the data in Swarm volumes does not. flux4swarm
+copies it with two standard tools instead of a mover of its own:
+[restic](https://restic.net) on the Swarm side and
+[VolSync](https://volsync.readthedocs.io)'s restic mover on Kubernetes,
+with an S3 compatible bucket (or any restic repository) in between. The
+two clusters never talk to each other.
+
+1. Export with `--volsync`. Next to every PersistentVolumeClaim, import
+   writes a VolSync `ReplicationDestination` (restic mover, `copyMethod:
+   Direct` into the claim, `enableFileDeletion: true`) and an
+   ExternalSecret `<claim>-volsync-restic` with the repository settings.
+   Both carry `swarm.flux4swarm.io/ignore: "true"`, so Swarm ignores them.
+   The cluster needs VolSync installed. In the secret store, put the base
+   repository under `volsync-restic-repository` (for example
+   `s3:https://s3.example.com/migration/prod`), the restic password under
+   `volsync-restic-password` and the S3 credentials under
+   `volsync-aws-access-key-id` / `volsync-aws-secret-access-key` (all after
+   `--secret-key-prefix`; `--volsync-env` changes the credential variables).
+   Each claim gets its own repository, `<base>/<namespace>/<claim>`.
+2. Keep the workload at 0 replicas on Kubernetes (a patch outside `apps/`)
+   until its data is there: the restore and the application must not use
+   the claim at the same time.
+3. Copy the data from Swarm with the same settings in the environment:
+
+   ```sh
+   export RESTIC_REPOSITORY=s3:https://s3.example.com/migration/prod
+   export RESTIC_PASSWORD=... AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+   flux4swarm volume-backup shop_db shop_uploads
+   ```
+
+   For each volume it starts a one-off replicated-job service that mounts
+   the volume exactly like the service that uses it (same driver and
+   options, so NFS/CIFS options, old volume plugins and cluster volumes all
+   work) read-only at `/data`, on the node where that service runs or last
+   ran, and runs `restic backup --host volsync .` there, which is the
+   layout VolSync's own backups have. The job and its temporary secret are
+   removed afterwards, and import skips them. `--node` picks the node when
+   it cannot be found (a service scaled to 0 on a multi-node Swarm), and
+   `--network` attaches the job to a network, for example to reach a
+   repository server on the Swarm.
+4. The `initial` manual trigger restores the newest snapshot once. Backups
+   are incremental, so run `volume-backup` while the service runs to
+   pre-seed, then at cutover stop the service, run it again and change the
+   trigger (patch `spec.trigger.manual` of the ReplicationDestination) for
+   the final restore. Then scale the workload up on Kubernetes. With
+   `import --watch`, take the workload over first (see above), because once
+   the Swarm service is scaled to 0 the next export writes `replicas: 0`.
+
+A file copy of a database is only consistent when the database is
+stopped. For a short cutover window, use the database's own replication
+or dump tools instead, and use `volume-backup` for file data.
+
 ## Several environments: one shared base
 
 Most teams run the same stacks on several Swarms, for example development,

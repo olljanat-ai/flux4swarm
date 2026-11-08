@@ -92,6 +92,14 @@ type Options struct {
 	// NoDefaultSecretEnvNames drops DefaultSecretEnvNames, so only
 	// SecretEnvNames are used; with none, all env values are exported as is.
 	NoDefaultSecretEnvNames bool
+	// VolSync exports a VolSync ReplicationDestination (restic mover) and its
+	// repository ExternalSecret next to every PersistentVolumeClaim, so data
+	// backed up with `flux4swarm volume-backup` is restored into the claim.
+	VolSync bool
+	// VolSyncEnv names the restic environment variables, besides
+	// RESTIC_REPOSITORY and RESTIC_PASSWORD, that the repository Secret
+	// carries (default DefaultVolSyncEnv).
+	VolSyncEnv []string
 }
 
 // DefaultSecretEnvNames are the well-known env var name parts that hold
@@ -171,6 +179,7 @@ func (s Skipped) String() string { return s.Kind + "/" + s.Name + " (" + s.Reaso
 const (
 	SkippedExcluded = "matches --exclude"
 	SkippedUnused   = "unused version of a flux4swarm managed object"
+	SkippedBackup   = "temporary object of flux4swarm volume-backup"
 )
 
 func (e *exporter) skipped(kind, name, reason string) {
@@ -242,6 +251,7 @@ type exporter struct {
 	cmKeys                      map[string]string // docker config logical name -> ns/cm/key
 	cms                         map[string]*corev1.ConfigMap
 	extSecrets                  map[string]*api.ExternalSecret // ns/name
+	volsyncKeys                 map[string][]string            // ns -> remote keys of the VolSync repository secrets
 	placeholders                []*corev1.Secret
 	secretEnv                   []string
 	pvcs                        map[string]*corev1.PersistentVolumeClaim
@@ -255,19 +265,20 @@ func Export(ctx context.Context, c Client, o Options) (*Result, error) {
 		return nil, err
 	}
 	e := &exporter{
-		o:          o,
-		res:        &Result{Files: map[string][]byte{}, Root: o.Path},
-		set:        &api.Set{},
-		files:      map[string][]any{},
-		nsUsed:     map[string]bool{},
-		original:   map[string]swarm.ServiceSpec{},
-		workload:   map[string]*metav1.ObjectMeta{},
-		podSpecs:   map[string]*corev1.PodSpec{},
-		cmKeys:     map[string]string{},
-		cms:        map[string]*corev1.ConfigMap{},
-		extSecrets: map[string]*api.ExternalSecret{},
-		secretEnv:  o.secretEnvPatterns(),
-		pvcs:       map[string]*corev1.PersistentVolumeClaim{},
+		o:           o,
+		res:         &Result{Files: map[string][]byte{}, Root: o.Path},
+		set:         &api.Set{},
+		files:       map[string][]any{},
+		nsUsed:      map[string]bool{},
+		original:    map[string]swarm.ServiceSpec{},
+		workload:    map[string]*metav1.ObjectMeta{},
+		podSpecs:    map[string]*corev1.PodSpec{},
+		cmKeys:      map[string]string{},
+		cms:         map[string]*corev1.ConfigMap{},
+		extSecrets:  map[string]*api.ExternalSecret{},
+		volsyncKeys: map[string][]string{},
+		secretEnv:   o.secretEnvPatterns(),
+		pvcs:        map[string]*corev1.PersistentVolumeClaim{},
 	}
 	e.res.Clean = []string{o.Path + "/" + AppsDir}
 	if err := e.run(ctx, c); err != nil {
@@ -332,6 +343,10 @@ func (e *exporter) run(ctx context.Context, c Client) error {
 			e.skipped(swarmapply.KindService, s.Spec.Name, SkippedExcluded)
 			continue
 		}
+		if _, ok := s.Spec.Labels[api.LabelVolumeBackup]; ok {
+			e.skipped(swarmapply.KindService, s.Spec.Name, SkippedBackup)
+			continue
+		}
 		if err := e.service(s, netNames, configByID, secretByID, allMW); err != nil {
 			return fmt.Errorf("service %s: %w", s.Spec.Name, err)
 		}
@@ -366,6 +381,10 @@ func (e *exporter) run(ctx context.Context, c Client) error {
 		name := logicalName(s.Spec.Name, s.Spec.Labels)
 		if e.o.skip(name) {
 			e.skipped(swarmapply.KindSecret, s.Spec.Name, SkippedExcluded)
+			continue
+		}
+		if _, ok := s.Spec.Labels[api.LabelVolumeBackup]; ok {
+			e.skipped(swarmapply.KindSecret, s.Spec.Name, SkippedBackup)
 			continue
 		}
 		if s.Spec.Labels[api.LabelName] != "" {
@@ -541,9 +560,8 @@ func (e *exporter) service(s swarm.Service, netNames map[string]string, configs 
 				e.note("service %s: templated volume %q is kept in the %s annotation", spec.Name, m.Source, api.AnnotationServiceSpec)
 				continue
 			}
-			vns, vshort := splitVolumeNS(m.Source, ns)
-			claim := dnsName(vshort)
-			if translate.SwarmName(vns, claim) != m.Source || vns != ns {
+			claim, ok := volumeClaim(ns, m.Source)
+			if !ok {
 				e.note("service %s: volume %q cannot keep its name in namespace %s; kept in the %s annotation", spec.Name, m.Source, ns, api.AnnotationServiceSpec)
 				continue
 			}
@@ -984,6 +1002,9 @@ func (e *exporter) pvc(ns, name string, vo *mount.VolumeOptions) {
 	e.add(e.nsDir(ns)+"/persistentvolumeclaim-"+name+".yaml", p)
 	e.set.PVCs = append(e.set.PVCs, p)
 	e.notes = appendOnce(e.notes, "PersistentVolumeClaims request a placeholder size of 1Gi; set the real size and storageClassName for Kubernetes.")
+	if e.o.VolSync {
+		e.volsync(ns, name)
+	}
 }
 
 // roundTrip renders the exported manifests back to Swarm specs and stores
@@ -1114,6 +1135,10 @@ func (e *exporter) write() error {
 		for _, d := range es.Spec.Data {
 			storeKeys[es.Metadata.Namespace] = append(storeKeys[es.Metadata.Namespace], d.RemoteRef.Key)
 		}
+	}
+	for ns, keys := range e.volsyncKeys {
+		needStore[ns] = true
+		storeKeys[ns] = append(storeKeys[ns], keys...)
 	}
 	clusterStoreWritten := false
 	for _, ns := range nss {
@@ -1413,6 +1438,28 @@ func splitNS(name string, labels map[string]string) (string, string) {
 		return dnsName(ns), strings.TrimPrefix(name, ns+"_")
 	}
 	return api.SwarmNamespace, name
+}
+
+// VolumeClaim returns the namespace and PersistentVolumeClaim name that
+// import gives the named Swarm volume source when service svc mounts it, or
+// ok false when import keeps the mount only in the service-spec annotation
+// (templated, external or foreign volumes).
+func VolumeClaim(svc swarm.Service, source string) (ns, claim string, ok bool) {
+	ns, _ = splitNS(svc.Spec.Name, svc.Spec.Labels)
+	claim, ok = volumeClaim(ns, source)
+	return ns, claim, ok
+}
+
+func volumeClaim(ns, source string) (string, bool) {
+	if source == "" || strings.Contains(source, "{{") {
+		return "", false
+	}
+	vns, vshort := splitVolumeNS(source, ns)
+	claim := dnsName(vshort)
+	if translate.SwarmName(vns, claim) != source || vns != ns {
+		return "", false
+	}
+	return claim, true
 }
 
 func splitVolumeNS(source, ns string) (string, string) {

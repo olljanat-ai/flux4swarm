@@ -162,6 +162,16 @@ flux4swarm migration-report --cluster prod            # Markdown to stdout
 flux4swarm migration-report --json --fail-on-blockers # for CI; exit 2 while blockers remain
 ```
 
+### Moving volume data
+
+`import --volsync` adds a [VolSync](https://volsync.readthedocs.io)
+ReplicationDestination to every PersistentVolumeClaim, and
+`flux4swarm volume-backup shop_db` copies the Swarm volume to the restic
+repository that it restores from. The copy is read through Docker with the
+volume's own driver, so NFS options, plugins and cluster volumes work the
+same as local volumes. See
+[docs/kubernetes-and-swarm.md](docs/kubernetes-and-swarm.md#moving-volume-data-restic--volsync).
+
 ### Keep exporting (Swarm stays the source of truth)
 
 `import --watch` keeps running: it exports again after every Swarm service,

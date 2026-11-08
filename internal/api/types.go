@@ -37,7 +37,10 @@ const (
 	LabelName               = "flux4swarm.io/name"
 	LabelSpecHash           = "flux4swarm.io/spec-hash"
 	LabelExternalSecret     = "flux4swarm.io/external-secret"
-	LabelStackNamespace     = "com.docker.stack.namespace"
+	// LabelVolumeBackup marks the temporary job and secret of
+	// `flux4swarm volume-backup`; import skips them.
+	LabelVolumeBackup   = "flux4swarm.io/volume-backup"
+	LabelStackNamespace = "com.docker.stack.namespace"
 )
 
 // Annotations understood on Kubernetes objects. Stock Flux ignores them.
@@ -280,11 +283,14 @@ type ExternalSecretTarget struct {
 	Template *ExternalSecretTemplate `json:"template,omitempty"`
 }
 
-// ExternalSecretTemplate carries metadata for the created secret.
+// ExternalSecretTemplate carries metadata, and optionally templated data,
+// for the created secret.
 type ExternalSecretTemplate struct {
-	Metadata struct {
+	EngineVersion string `json:"engineVersion,omitempty"`
+	Metadata      struct {
 		Labels map[string]string `json:"labels,omitempty"`
 	} `json:"metadata,omitempty"`
+	Data map[string]string `json:"data,omitempty"`
 }
 
 // ExternalSecretData maps one remote value to one key.

@@ -148,7 +148,7 @@ func newRoot() *cobra.Command {
 	root.PersistentFlags().StringVar(&g.namespace, "default-namespace", envOr(api.EnvSwarmNamespace, api.SwarmNamespace),
 		"Kubernetes namespace of Swarm objects without a stack (e.g. made with docker service create): import puts them there and reconcile deploys it without a stack prefix (env "+api.EnvSwarmNamespace+")")
 	root.AddCommand(newControllerCmd(modeController), newControllerCmd(modeReconcile), newControllerCmd(modeDiff),
-		newImportCmd(), newReportCmd(), newMergeCmd(), newGetCmd(), newSuspendCmd(true), newSuspendCmd(false), newVersionCmd())
+		newImportCmd(), newReportCmd(), newVolumeBackupCmd(), newMergeCmd(), newGetCmd(), newSuspendCmd(true), newSuspendCmd(false), newVersionCmd())
 	return root
 }
 
@@ -586,6 +586,8 @@ func newImportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.SecretKeyPrefix, "secret-key-prefix", "", "prefix for remoteRef.key")
 	cmd.Flags().StringVar(&exclude, "exclude", "", "regular expression of Swarm object names to skip")
 	cmd.Flags().StringSliceVar(&o.SecretEnvNames, "secret-env-name", nil, "extra env var name part (case-insensitive) whose values go to the secret store instead of Git; repeatable, added to the built-in list ("+strings.Join(importer.DefaultSecretEnvNames, ", ")+")")
+	cmd.Flags().BoolVar(&o.VolSync, "volsync", false, "also export, for every PersistentVolumeClaim, a VolSync ReplicationDestination (restic mover) and its repository ExternalSecret, so Kubernetes restores the data copied by `flux4swarm volume-backup` (needs VolSync on the cluster)")
+	cmd.Flags().StringSliceVar(&o.VolSyncEnv, "volsync-env", importer.DefaultVolSyncEnv, "with --volsync: restic env vars, besides RESTIC_REPOSITORY and RESTIC_PASSWORD, that the repository secret carries")
 	cmd.Flags().BoolVar(&o.NoDefaultSecretEnvNames, "no-default-secret-env-names", false, "do not use the built-in --secret-env-name list; with no --secret-env-name, all env values are exported as is")
 	cmd.Flags().StringVar(&message, "commit-message", "", "commit message (default: one written from what changed, such as \"shop: api image 1.4→1.5, removed tmp-debug\")")
 	cmd.Flags().StringVar(&author, "author", "flux4swarm", "commit author name")
