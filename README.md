@@ -211,6 +211,9 @@ nightly test cluster, that restore the newest data before the applications
 start. See
 [docs/kubernetes-and-swarm.md](docs/kubernetes-and-swarm.md#moving-volume-data-restic--volsync)
 and the [metrics and dashboard](docs/monitoring.md#volume-sync-and-migration).
+[docs/performance.md](docs/performance.md) has measured times for one 10 GB
+volume and for 100 volumes of 100 MB: first copy, increments, restores and
+cutover downtime.
 
 ### Keep exporting (Swarm stays the source of truth)
 

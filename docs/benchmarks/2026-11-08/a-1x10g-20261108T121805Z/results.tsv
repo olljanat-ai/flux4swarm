@@ -1,0 +1,7 @@
+scenario	phase	parallel	volumes	data_mb	seconds	mb_per_s
+a-1x10g	backup-full	1	1	10000	162.4	61.5
+a-1x10g	backup-noop	1	1	0	6.1	0.0
+a-1x10g	backup-incr	1	1	100	14.2	7.0
+a-1x10g	cutover	1	1	100	30.9	3.2
+a-1x10g	restore-full	-	1	10000	69.4	144.0
+a-1x10g	restore-incr	-	1	200	45.9	4.3
