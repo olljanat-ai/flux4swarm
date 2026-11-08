@@ -80,7 +80,7 @@ Kubernetes).
 |--------|------|--------------|---------|
 | `flux4swarm_volume_sync_info` | gauge, always 1 | `service`, `node` | one per sync service |
 | `flux4swarm_volume_sync_up` | gauge | | 1 when the sync service has a running task |
-| `flux4swarm_volume_sync_interval_seconds` | gauge | | the backup interval |
+| `flux4swarm_volume_sync_interval_seconds` | gauge | | the backup interval; for a cron schedule, its longest gap |
 | `flux4swarm_volume_sync_rounds_total` | counter | `result` (`ok`, `error`) | rounds since the sync task started |
 | `flux4swarm_volume_sync_last_run_timestamp_seconds` | gauge | | end of the last round |
 | `flux4swarm_volume_sync_last_round_success` | gauge | | 1 when the last round succeeded |
@@ -112,13 +112,17 @@ Flux on Kubernetes (with the kube-state-metrics config of
 flux2-monitoring-example), flux4swarm, or both, and filter with the
 namespace and kind variables.
 
+![Volume sync and migration dashboard](images/grafana-volume-sync.png)
+
 [deploy/monitoring/grafana/volume-sync.json](../deploy/monitoring/grafana/volume-sync.json)
 shows the sync services and cutovers: how many run, fail or fall behind,
 a table per volume (age of the last successful backup, interval, round
 duration, increment, size), the time since the last backup, increment,
 duration and size over time, and for `--migrate` the migrated and waiting
 services, failed cutovers, services started again on Swarm, and the Swarm
-downtime of each cutover. Filter it by Swarm volume.
+downtime of each cutover. Cutovers are marked on every graph. Filter it by
+Swarm volume. The screenshot shows three volumes synced every 30 seconds and
+one on a cron schedule (`*/2 * * * *`), and two services that were cut over.
 
 ## Running it on Swarm
 

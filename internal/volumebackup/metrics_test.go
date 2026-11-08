@@ -45,7 +45,7 @@ func (f *logFake) ServiceLogs(context.Context, string, container.LogsOptions) (i
 
 func TestCollector(t *testing.T) {
 	tg := &Target{Volume: "shop_db", Namespace: "shop", Claim: "db", Mount: mount.Mount{Type: mount.TypeVolume, Source: "shop_db", Target: "/db"}, Node: "n1"}
-	spec := SyncSpec(tg, DefaultImage, "sec", "secname", nil, time.Minute, 4)
+	spec := SyncSpec(tg, DefaultImage, "sec", "secname", nil, time.Minute, "", 4)
 	f := &logFake{fake{services: []swarm.Service{{ID: "sync", Spec: spec}}, tasks: map[string][]swarm.Task{"sync": {task("n1", swarm.TaskStateRunning, 0)}}}}
 	reg := prometheus.NewPedanticRegistry()
 	reg.MustRegister(Collector{Client: f})

@@ -111,6 +111,9 @@ func (e *exporter) volsync(ns, name string) {
 	switch {
 	case e.o.VolSyncCutover:
 		trigger = map[string]any{"manual": VolSyncFinal}
+	case e.o.VolSyncRestoreFirst:
+	case e.restoreSchedule[ns+"/"+name] != "":
+		trigger = map[string]any{"schedule": e.restoreSchedule[ns+"/"+name]}
 	case e.o.VolSyncSchedule != "":
 		trigger = map[string]any{"schedule": e.o.VolSyncSchedule}
 	}
@@ -138,6 +141,21 @@ func (e *exporter) volsync(ns, name string) {
 		hold = ""
 	}
 	e.notes = appendOnce(e.notes, "Every PersistentVolumeClaim has a VolSync ReplicationDestination that restores the newest restic snapshot written by `flux4swarm volume-backup`; store the base repository, password and credentials under the "+e.o.SecretKeyPrefix+VolSyncRemoteKey+"* keys of the secret store."+hold)
+}
+
+// restoreSchedule is the restore cron the labels of a service ask for:
+// api.LabelVolumeRestoreSchedule, else a cron api.LabelVolumeSyncSchedule
+// (restores then run at the same times and get the previous round, unless
+// the restore label shifts them after the backups).
+func restoreSchedule(labels map[string]string) string {
+	if v := strings.TrimSpace(labels[api.LabelVolumeRestoreSchedule]); v != "" {
+		return v
+	}
+	v := strings.TrimSpace(labels[api.LabelVolumeSyncSchedule])
+	if _, err := time.ParseDuration(v); err == nil || v == "" {
+		return ""
+	}
+	return v
 }
 
 // WorkloadName returns the namespace and name of the Kubernetes workload

@@ -65,6 +65,14 @@ const (
 	// AnnotationHeld on an exported Deployment records the Swarm replicas
 	// while Kubernetes holds it at 0 until its volumes are migrated.
 	AnnotationHeld = "flux4swarm.io/held-replicas"
+	// LabelVolumeSyncSchedule on a Swarm service sets how its volumes are
+	// synced by import --volsync-sync[-schedule]: a duration ("15m") or a
+	// 5-field cron schedule in UTC ("0 1 * * *"), overriding the flags.
+	LabelVolumeSyncSchedule = "flux4swarm.io/volume-sync-schedule"
+	// LabelVolumeRestoreSchedule on a Swarm service sets the cron schedule
+	// of the restores of its claims on Kubernetes. Default: the
+	// LabelVolumeSyncSchedule cron, or --volsync-schedule.
+	LabelVolumeRestoreSchedule = "flux4swarm.io/volume-restore-schedule"
 	// LabelMigrate on a Swarm service set to MigrateKubernetes asks
 	// import --migrate to move it to Kubernetes.
 	LabelMigrate      = "flux4swarm.io/migrate"

@@ -53,10 +53,19 @@ func newVolumeBackupCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&o.Networks, "network", nil, "attach the backup job to these networks, e.g. to reach a repository server running on the Swarm")
 	cmd.Flags().DurationVar(&o.Timeout, "timeout", time.Hour, "how long to wait for each backup")
 	cmd.Flags().DurationVar(&o.Every, "every", 0, "instead of one backup, start a long-running sync service that backs up incrementally at this interval (e.g. 15m) until it is stopped; a later one-off volume-backup of the volume (the final copy) or --stop removes it")
-	cmd.Flags().IntVar(&o.Keep, "keep", 24, "with --every: snapshots to keep; every --keep rounds the older ones are forgotten and pruned")
+	cmd.Flags().StringVar(&o.Schedule, "schedule", "", "like --every, but the sync service backs up at the times of this 5-field cron schedule in UTC, e.g. \"0 1 * * 1-5\" outside business hours for very large volumes (pair it with import --volsync-schedule a bit later)")
+	cmd.Flags().IntVar(&o.Keep, "keep", 24, "with --every or --schedule: snapshots to keep; every --keep rounds the older ones are forgotten and pruned")
 	cmd.Flags().BoolVar(&o.Restore, "restore", false, "the other way round, to roll back: restore the newest snapshot of each volume's repository (for example one VolSync wrote from the claim on Kubernetes) into the Swarm volume, deleting files that are not in it; the services using the volume must be stopped")
 	cmd.Flags().BoolVar(&stop, "stop", false, "remove the sync services of the volumes and do nothing else")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		if o.Schedule != "" {
+			if o.Every > 0 {
+				return fmt.Errorf("give --every or --schedule, not both")
+			}
+			if _, sched, err := volumebackup.ParseSchedule(o.Schedule); err != nil || sched == "" {
+				return fmt.Errorf("--schedule %q is not a 5-field cron schedule", o.Schedule)
+			}
+		}
 		o.Env = map[string]string{"RESTIC_PASSWORD": os.Getenv("RESTIC_PASSWORD")}
 		for _, k := range env {
 			if k = strings.TrimSpace(k); k == "" {

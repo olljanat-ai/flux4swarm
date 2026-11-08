@@ -602,7 +602,7 @@ func newImportCmd() *cobra.Command {
 		mergeEnvs      []string
 		basePath       string
 		migrateOn      bool
-		volsyncSync    time.Duration
+		volsyncSync    string
 	)
 	cmd := &cobra.Command{
 		Use:   "import",
@@ -635,7 +635,7 @@ func newImportCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&o.VolSync, "volsync", false, "also export, for every PersistentVolumeClaim, a VolSync ReplicationDestination (restic mover) and its repository ExternalSecret, so Kubernetes restores the data copied by `flux4swarm volume-backup` (needs VolSync on the cluster)")
 	cmd.Flags().StringVar(&o.VolSyncSchedule, "volsync-schedule", "", "with --volsync: cron schedule of the restores (e.g. \"*/15 * * * *\"), to keep each claim close to a continuously synced Swarm volume (volume-backup --every); default: restore once")
 	cmd.Flags().StringSliceVar(&o.VolSyncEnv, "volsync-env", importer.DefaultVolSyncEnv, "with --volsync: restic env vars, besides RESTIC_REPOSITORY and RESTIC_PASSWORD, that the repository secret carries")
-	cmd.Flags().DurationVar(&volsyncSync, "volsync-sync", 0, "implies --volsync: keep a sync service (volume-backup --every) running on Swarm for every exported volume, backing it up at this interval, and restore on Kubernetes on a matching --volsync-schedule (derived when not set); the restic settings come from RESTIC_REPOSITORY, RESTIC_PASSWORD and the --volsync-env variables")
+	cmd.Flags().StringVar(&volsyncSync, "volsync-sync", "", "implies --volsync: keep a sync service running on Swarm for every exported volume, backing it up at this interval (\"15m\") or on this 5-field cron schedule in UTC (\"0 1 * * *\", e.g. outside business hours), and restore on Kubernetes on a matching --volsync-schedule (derived when not set); the Swarm service label "+api.LabelVolumeSyncSchedule+" overrides it per service (and starts sync services for labelled services with plain --volsync); the restic settings come from RESTIC_REPOSITORY, RESTIC_PASSWORD and the --volsync-env variables")
 	cmd.Flags().BoolVar(&o.VolSyncRestoreFirst, "volsync-restore-first", false, "implies --volsync, for a Kubernetes cluster built from scratch from the export (e.g. a nightly test cluster): write the claims and their one-off restores to <path>/"+importer.DataDir+" and Flux Kustomizations (<path>/"+importer.LayersFile+") that apply them first, wait until every claim is restored and only then start apps/ at the real replica counts; pair it with --volsync-sync so each rebuild gets data at most one sync interval old")
 	cmd.Flags().BoolVar(&migrateOn, "migrate", false, "cut over services labelled "+api.LabelMigrate+"="+api.MigrateKubernetes+" one by one: stop them on Swarm, back up the last increment of their volumes, and hand them to Kubernetes in <path>/"+migrate.Dir+"/ (where they stay; a migrated service is kept at 0 replicas on Swarm)")
 	cmd.Flags().BoolVar(&o.NoDefaultSecretEnvNames, "no-default-secret-env-names", false, "do not use the built-in --secret-env-name list; with no --secret-env-name, all env values are exported as is")
@@ -690,10 +690,19 @@ func newImportCmd() *cobra.Command {
 		if o.VolSyncRestoreFirst && len(mergeEnvs) > 0 {
 			return fmt.Errorf("--volsync-restore-first cannot be combined with --merge")
 		}
-		if volsyncSync > 0 {
+		var syncEvery time.Duration
+		var syncCron string
+		if volsyncSync != "" {
+			var err error
+			if syncEvery, syncCron, err = volumebackup.ParseSchedule(volsyncSync); err != nil {
+				return fmt.Errorf("--volsync-sync: %w", err)
+			}
 			o.VolSync = true
 			if o.VolSyncSchedule == "" && !o.VolSyncRestoreFirst {
-				o.VolSyncSchedule = syncSchedule(volsyncSync)
+				o.VolSyncSchedule = syncCron
+				if syncEvery > 0 {
+					o.VolSyncSchedule = syncSchedule(syncEvery)
+				}
 			}
 		}
 		// The restic settings of the sync services and the final backups.
@@ -703,7 +712,7 @@ func newImportCmd() *cobra.Command {
 				bo.Env[k] = v
 			}
 		}
-		if volsyncSync > 0 && (bo.Repository == "" || bo.Env["RESTIC_PASSWORD"] == "") {
+		if volsyncSync != "" && (bo.Repository == "" || bo.Env["RESTIC_PASSWORD"] == "") {
 			return fmt.Errorf("--volsync-sync needs RESTIC_REPOSITORY and RESTIC_PASSWORD in the environment")
 		}
 		// pushed is the commit of the last export that changed Git.
@@ -751,20 +760,35 @@ func newImportCmd() *cobra.Command {
 			}
 			pending = nil
 		}
-		// ensureSync keeps a sync service running for every exported volume.
+		// ensureSync keeps a sync service running for every exported volume
+		// (with --volsync-sync) or every volume of a service with the sync
+		// label, with the settings the label or the flag asks for.
 		ensureSync := func(ctx context.Context, res *importer.Result) {
-			if volsyncSync <= 0 {
+			if !o.VolSync || bo.Repository == "" {
 				return
 			}
-			so := bo
-			so.Every = volsyncSync
 			for _, v := range res.Volumes {
+				so := bo
+				so.Every, so.Schedule = syncEvery, syncCron
+				if l := res.VolumeSync[v]; l != "" {
+					every, sched, err := volumebackup.ParseSchedule(l)
+					if err != nil {
+						slog.Error("volume sync: invalid "+api.LabelVolumeSyncSchedule+" label; using the default", "volume", v, "error", err)
+					} else {
+						so.Every, so.Schedule = every, sched
+					}
+				}
+				if so.Every == 0 && so.Schedule == "" {
+					continue
+				}
 				r, err := volumebackup.EnsureSync(ctx, dc, v, so)
 				switch {
 				case err != nil:
 					slog.Error("volume sync: could not start the sync service; retried at the next export", "volume", v, "error", err)
+				case r != nil && r.Replaced:
+					slog.Info("volume sync: sync service replaced with new settings", "volume", v, "service", r.Service, "node", r.Node, "repository", r.Repository, "when", so.When())
 				case r != nil:
-					slog.Info("volume sync: sync service started", "volume", v, "service", r.Service, "node", r.Node, "repository", r.Repository, "every", volsyncSync)
+					slog.Info("volume sync: sync service started", "volume", v, "service", r.Service, "node", r.Node, "repository", r.Repository, "when", so.When())
 				}
 			}
 		}

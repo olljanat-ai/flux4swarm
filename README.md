@@ -198,7 +198,10 @@ docker service update --label-add flux4swarm.io/migrate=kubernetes shop_db
 ```
 
 `--volsync-sync` keeps a sync service running for every volume and
-restores on a matching schedule. `--migrate` cuts over each labelled
+restores on a matching schedule. It takes an interval (`15m`) or a cron
+schedule (`0 1 * * 1-5`), and the service label
+`flux4swarm.io/volume-sync-schedule` sets it per application, so the
+largest volumes copy outside business hours. `--migrate` cuts over each labelled
 service: it stops the service on Swarm, backs up the last increment, moves
 it to `migrated/` in Git, where Flux restores the data before it starts
 the workload, and keeps it stopped on Swarm until it is rolled back. Every

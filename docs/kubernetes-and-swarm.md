@@ -319,7 +319,31 @@ flux4swarm import --watch --cluster prod --bootstrap \
   (`*/15 * * * *` here; `--volsync-schedule` overrides it). The restic
   settings come from the environment of the watcher, the same values the
   secret store holds for Kubernetes. Run the watcher on a manager with
-  access to the repository.
+  access to the repository. A sync service whose interval, schedule or
+  restic settings no longer match is replaced.
+* Very large volumes can be copied outside business hours instead: give
+  `--volsync-sync` a 5-field cron schedule in UTC, or put the label
+  `flux4swarm.io/volume-sync-schedule` on the Swarm services that need it.
+  The label takes a duration or a cron schedule and overrides the flag for
+  that service's volumes. With only `--volsync`, sync services run just for
+  the labelled services.
+
+  ```sh
+  # Weeknights at 01:00 UTC; restores on Kubernetes at 05:00 UTC.
+  docker service update \
+    --label-add 'flux4swarm.io/volume-sync-schedule=0 1 * * 1-5' \
+    --label-add 'flux4swarm.io/volume-restore-schedule=0 5 * * 1-5' erp_db
+  ```
+
+  In cron mode the sync service runs busybox `crond` in the restic image.
+  A round that is still running when the next one is due is skipped, not
+  doubled. The restores follow the label `flux4swarm.io/volume-restore-schedule`.
+  Without it they run on the same cron as the backups and so restore the
+  previous round. Leave the backup enough time and schedule the restore
+  after it. `flux4swarm_volume_sync_interval_seconds` is then the longest
+  gap of the schedule (Friday to Monday above), so the "behind" alert
+  allows for it. `volume-backup --schedule '0 1 * * *'` starts the same
+  kind of service by hand.
 * `--migrate` watches for the label `flux4swarm.io/migrate=kubernetes`
   on Swarm services. Put it on with
   `docker service update --label-add flux4swarm.io/migrate=kubernetes shop_db`

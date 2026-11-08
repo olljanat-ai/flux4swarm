@@ -206,23 +206,67 @@ func TestBackup(t *testing.T) {
 func TestSyncSpec(t *testing.T) {
 	tg := &Target{Volume: "shop_db", Namespace: "shop", Claim: "db",
 		Mount: mount.Mount{Type: mount.TypeVolume, Source: "shop_db", Target: "/db"}, Node: "worker-1"}
-	s := SyncSpec(tg, DefaultImage, "sec", "secname", nil, 15*time.Minute, 4)
+	s := SyncSpec(tg, DefaultImage, "sec", "secname", nil, 15*time.Minute, "", 4)
 	if s.Name != "flux4swarm-sync-shop-db" || s.Labels[labelSync] != "true" || s.Labels[api.LabelVolumeBackup] != "shop_db" {
 		t.Errorf("spec %+v", s.Annotations)
 	}
 	if s.Mode.Replicated == nil || *s.Mode.Replicated.Replicas != 1 || s.TaskTemplate.RestartPolicy.Condition != swarm.RestartPolicyConditionAny {
 		t.Errorf("mode %+v, restart %+v", s.Mode, s.TaskTemplate.RestartPolicy)
 	}
-	script := s.TaskTemplate.ContainerSpec.Command[2]
+	script := s.TaskTemplate.ContainerSpec.Command[2] + "\n" + strings.Join(s.TaskTemplate.ContainerSpec.Env, "\n")
 	for _, want := range []string{
-		"while :; do",
+		"while :; do flock /tmp/round.lock sh /tmp/round.sh; sleep 900; done",
 		"restic backup --host volsync --exclude lost+found .",
 		"if [ $((n % 4)) -eq 0 ]; then restic forget --host volsync --keep-last 4 --prune --retry-lock 10m",
-		"sleep 900",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script misses %q:\n%s", want, script)
 		}
+	}
+	if s.Labels[labelEvery] != "900" || s.Labels[labelSchedule] != "" {
+		t.Errorf("labels %v", s.Labels)
+	}
+
+	c := SyncSpec(tg, DefaultImage, "sec", "secname", nil, 0, "0 1 * * 1-5", 4)
+	script = c.TaskTemplate.ContainerSpec.Command[2]
+	if !strings.Contains(script, "exec crond -f") || strings.Contains(script, "while :") ||
+		!strings.Contains(strings.Join(c.TaskTemplate.ContainerSpec.Env, "\n"), "SCHEDULE=0 1 * * 1-5") {
+		t.Errorf("cron script:\n%s\n%v", script, c.TaskTemplate.ContainerSpec.Env)
+	}
+	// Friday 01:00 to Monday 01:00.
+	if c.Labels[labelSchedule] != "0 1 * * 1-5" || c.Labels[labelEvery] != "259200" {
+		t.Errorf("cron labels %v", c.Labels)
+	}
+}
+
+func TestParseSchedule(t *testing.T) {
+	for in, want := range map[string]string{"15m": "15m0s", "0 1 * * *": "0 1 * * *", "*/30 22-23,0-5 * * *": "*/30 22-23,0-5 * * *"} {
+		every, sched, err := ParseSchedule(in)
+		if err != nil || (every.String() != want && sched != want) {
+			t.Errorf("%q: %v %q %v", in, every, sched, err)
+		}
+	}
+	for _, in := range []string{"", "-5m", "nightly", "@daily", "0 1 * *"} {
+		if _, _, err := ParseSchedule(in); err == nil {
+			t.Errorf("%q: no error", in)
+		}
+	}
+}
+
+func TestEnsureSyncReplaces(t *testing.T) {
+	f := &fake{
+		services: []swarm.Service{dbService(mount.Mount{Type: mount.TypeVolume, Source: "shop_db", Target: "/db"})},
+		tasks:    map[string][]swarm.Task{"db": {task("n1", swarm.TaskStateRunning, 0)}},
+	}
+	o := Options{Repository: "rest:http://repo/", Env: map[string]string{"RESTIC_PASSWORD": "pw"}, Every: time.Minute, Poll: time.Millisecond}
+	if _, err := EnsureSync(context.Background(), f, "shop_db", o); err != nil {
+		t.Fatal(err)
+	}
+	f.services = append(f.services, swarm.Service{ID: "sync", Spec: f.created[0]})
+	o.Every, o.Schedule = 0, "0 1 * * *"
+	r, err := EnsureSync(context.Background(), f, "shop_db", o)
+	if err != nil || r == nil || !r.Replaced || len(f.created) != 2 || f.created[1].Labels[labelSchedule] != "0 1 * * *" {
+		t.Errorf("%+v, %v, created %d", r, err, len(f.created))
 	}
 }
 
@@ -289,4 +333,31 @@ func TestRestore(t *testing.T) {
 		!strings.Contains(s.TaskTemplate.ContainerSpec.Command[2], "restic restore latest --path /data --target /data --delete") {
 		t.Errorf("restore job %s, mount %+v:\n%s", s.Name, s.TaskTemplate.ContainerSpec.Mounts[0], s.TaskTemplate.ContainerSpec.Command[2])
 	}
+}
+
+func TestEnsureSyncNewRepository(t *testing.T) {
+	f := &fake{
+		services: []swarm.Service{dbService(mount.Mount{Type: mount.TypeVolume, Source: "shop_db", Target: "/db"})},
+		tasks:    map[string][]swarm.Task{"db": {task("n1", swarm.TaskStateRunning, 0)}},
+	}
+	o := Options{Repository: "rest:http://repo/", Env: map[string]string{"RESTIC_PASSWORD": "pw"}, Every: time.Minute, Poll: time.Millisecond}
+	if _, err := EnsureSync(context.Background(), f, "shop_db", o); err != nil {
+		t.Fatal(err)
+	}
+	f.services = append(f.services, swarm.Service{ID: "sync", Spec: f.created[0]})
+	o.Env = map[string]string{"RESTIC_PASSWORD": "rotated"}
+	if r, err := EnsureSync(context.Background(), f, "shop_db", o); err != nil || r == nil || !r.Replaced {
+		t.Errorf("a new password did not replace the sync service: %+v, %v", r, err)
+	}
+	if strings.Contains(strings.Join(mapValues(f.created[1].Labels), " "), "rotated") {
+		t.Error("the password is in a label")
+	}
+}
+
+func mapValues(m map[string]string) []string {
+	var out []string
+	for _, v := range m {
+		out = append(out, v)
+	}
+	return out
 }

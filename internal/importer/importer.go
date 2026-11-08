@@ -175,6 +175,9 @@ type Result struct {
 	Notes []string
 	// Volumes are the Swarm volumes exported as PersistentVolumeClaims.
 	Volumes []string
+	// VolumeSync is the api.LabelVolumeSyncSchedule of the service that
+	// mounts each volume, when set.
+	VolumeSync map[string]string
 	// Skipped lists the Swarm objects that were not exported, and why.
 	Skipped []Skipped
 	// Desired is the Swarm state the export renders to, for AdoptLabels.
@@ -285,6 +288,7 @@ type exporter struct {
 	cms                         map[string]*corev1.ConfigMap
 	extSecrets                  map[string]*api.ExternalSecret // ns/name
 	volsyncKeys                 map[string][]string            // ns -> remote keys of the VolSync repository secrets
+	restoreSchedule             map[string]string              // ns/claim -> restore cron from the service labels
 	placeholders                []*corev1.Secret
 	secretEnv                   []string
 	pvcs                        map[string]*corev1.PersistentVolumeClaim
@@ -298,20 +302,21 @@ func Export(ctx context.Context, c Client, o Options) (*Result, error) {
 		return nil, err
 	}
 	e := &exporter{
-		o:           o,
-		res:         &Result{Files: map[string][]byte{}, Root: o.Path},
-		set:         &api.Set{},
-		files:       map[string][]any{},
-		nsUsed:      map[string]bool{},
-		original:    map[string]swarm.ServiceSpec{},
-		workload:    map[string]*metav1.ObjectMeta{},
-		podSpecs:    map[string]*corev1.PodSpec{},
-		cmKeys:      map[string]string{},
-		cms:         map[string]*corev1.ConfigMap{},
-		extSecrets:  map[string]*api.ExternalSecret{},
-		volsyncKeys: map[string][]string{},
-		secretEnv:   o.secretEnvPatterns(),
-		pvcs:        map[string]*corev1.PersistentVolumeClaim{},
+		o:               o,
+		res:             &Result{Files: map[string][]byte{}, Root: o.Path, VolumeSync: map[string]string{}},
+		restoreSchedule: map[string]string{},
+		set:             &api.Set{},
+		files:           map[string][]any{},
+		nsUsed:          map[string]bool{},
+		original:        map[string]swarm.ServiceSpec{},
+		workload:        map[string]*metav1.ObjectMeta{},
+		podSpecs:        map[string]*corev1.PodSpec{},
+		cmKeys:          map[string]string{},
+		cms:             map[string]*corev1.ConfigMap{},
+		extSecrets:      map[string]*api.ExternalSecret{},
+		volsyncKeys:     map[string][]string{},
+		secretEnv:       o.secretEnvPatterns(),
+		pvcs:            map[string]*corev1.PersistentVolumeClaim{},
 	}
 	e.res.Clean = []string{o.Path + "/" + AppsDir}
 	if o.VolSyncRestoreFirst {
@@ -629,6 +634,12 @@ func (e *exporter) service(s swarm.Service, netNames map[string]string, configs 
 			}
 			pod.Volumes = appendVolume(pod.Volumes, corev1.Volume{Name: claim, VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim}}})
+			if _, ok := e.restoreSchedule[ns+"/"+claim]; !ok {
+				e.restoreSchedule[ns+"/"+claim] = restoreSchedule(spec.Labels)
+			}
+			if v := strings.TrimSpace(spec.Labels[api.LabelVolumeSyncSchedule]); v != "" {
+				e.res.VolumeSync[m.Source] = v
+			}
 			e.pvc(ns, claim, m.VolumeOptions)
 			if !contains(e.res.Volumes, m.Source) {
 				e.res.Volumes = append(e.res.Volumes, m.Source)

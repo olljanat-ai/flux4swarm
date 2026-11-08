@@ -16,6 +16,7 @@ package volumebackup
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -29,6 +30,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/swarm"
+	"github.com/robfig/cron/v3"
 
 	"github.com/olljanat-ai/flux4swarm/internal/api"
 	"github.com/olljanat-ai/flux4swarm/internal/importer"
@@ -73,6 +75,10 @@ type Options struct {
 	// one-off job: it backs up the volume, sleeps Every and repeats until it
 	// is stopped (StopSync, or the next one-off Backup of the volume).
 	Every time.Duration
+	// Schedule, instead of Every, runs the rounds of the sync service at the
+	// times of a 5-field cron schedule in UTC, such as "0 1 * * *" for
+	// large volumes that should be copied outside business hours.
+	Schedule string
 	// Restore runs the job the other way round, for a rollback: it
 	// restores the newest snapshot of the repository into the volume
 	// (deleting files that are not in it). The services using the volume
@@ -91,6 +97,9 @@ type Options struct {
 
 // Result describes a finished backup.
 type Result struct {
+	// Replaced is set by EnsureSync when a sync service with other
+	// settings was replaced.
+	Replaced   bool
 	Volume     string
 	Namespace  string
 	Claim      string
@@ -288,45 +297,113 @@ func RestoreSpec(t *Target, image, secretID, secretName string, networks []strin
 }
 
 // SyncSpec returns the long-running service that backs up t every
-// interval, keeping keep snapshots. Each round is incremental, and the
-// restic cache stays in the container between rounds, so a round of an
-// unchanged volume only reads file metadata.
-func SyncSpec(t *Target, image, secretID, secretName string, networks []string, every time.Duration, keep int) swarm.ServiceSpec {
+// interval, or at the times of a cron schedule (5 fields, in UTC), keeping
+// keep snapshots. Each round is incremental, and the restic cache stays in
+// the container between rounds, so a round of an unchanged volume only
+// reads file metadata. A round never overlaps the previous one.
+func SyncSpec(t *Target, image, secretID, secretName string, networks []string, every time.Duration, schedule string, keep int) swarm.ServiceSpec {
 	secs := int(every.Round(time.Second) / time.Second)
 	if secs < 1 {
 		secs = 1
 	}
-	script := strings.Join([]string{
+	// One round, in a file of its own so crond can run it too; the round
+	// counters survive between rounds in a state file.
+	round := strings.Join([]string{
 		"set -u",
 		"set -a; . /run/secrets/" + envFile + "; set +a",
-		"until restic cat config >/dev/null 2>&1 || restic init; do sleep 30; done",
+		"export RESTIC_CACHE_DIR=/var/cache/restic",
 		"cd " + importer.VolSyncDataDir,
 		"n=0 ok=0 failed=0",
-		"while :; do",
-		"  n=$((n+1)) start=$(date +%s) r=ok",
+		"[ -f /tmp/sync.state ] && read n ok failed < /tmp/sync.state",
+		"n=$((n+1)) start=$(date +%s) r=ok",
 		// --json --quiet prints only the summary (and errors on stderr).
-		"  out=$(" + backupCmd + " --json --quiet) || { r=error; out=; }",
-		"  [ $r = ok ] && ok=$((ok+1)) || failed=$((failed+1))",
-		"  s=$(printf '%s\\n' \"$out\" | grep '\"message_type\":\"summary\"' | tail -n 1)",
+		"out=$(" + backupCmd + " --json --quiet) || { r=error; out=; }",
+		"[ $r = ok ] && ok=$((ok+1)) || failed=$((failed+1))",
+		"echo \"$n $ok $failed\" > /tmp/sync.state",
+		"s=$(printf '%s\\n' \"$out\" | grep '\"message_type\":\"summary\"' | tail -n 1)",
 		// One line per round, read by the metrics of import --watch.
-		"  echo \"" + StatusPrefix + "{\\\"round\\\":$n,\\\"result\\\":\\\"$r\\\",\\\"ok\\\":$ok,\\\"failed\\\":$failed,\\\"start\\\":$start,\\\"end\\\":$(date +%s),\\\"summary\\\":${s:-null}}\"",
+		"echo \"" + StatusPrefix + "{\\\"round\\\":$n,\\\"result\\\":\\\"$r\\\",\\\"ok\\\":$ok,\\\"failed\\\":$failed,\\\"start\\\":$start,\\\"end\\\":$(date +%s),\\\"summary\\\":${s:-null}}\"",
 		// forget and prune lock the repository exclusively, which makes a
 		// VolSync restore that runs at that moment fail and retry, so they
 		// run only every keep rounds.
-		fmt.Sprintf("  if [ $((n %% %d)) -eq 0 ]; then restic forget --host %s --keep-last %d --prune --retry-lock 10m || true; fi", keep, importer.VolSyncHost, keep),
-		fmt.Sprintf("  sleep %d", secs),
-		"done",
+		fmt.Sprintf("if [ $((n %% %d)) -eq 0 ]; then restic forget --host %s --keep-last %d --prune --retry-lock 10m || true; fi", keep, importer.VolSyncHost, keep),
 	}, "\n")
+	run := "flock /tmp/round.lock sh /tmp/round.sh"
+	lines := []string{
+		"set -u",
+		"printf '%s\\n' \"$ROUND\" > /tmp/round.sh",
+		"set -a; . /run/secrets/" + envFile + "; set +a",
+		"until restic cat config >/dev/null 2>&1 || restic init; do sleep 30; done",
+	}
+	if schedule != "" {
+		// crond runs the rounds; their output goes to the container log.
+		lines = append(lines,
+			"mkdir -p /tmp/crontabs",
+			"printf '%s %s\\n' \"$SCHEDULE\" 'flock -n /tmp/round.lock sh /tmp/round.sh > /proc/1/fd/1 2>&1' > /tmp/crontabs/root",
+			"echo \"=== rounds at '$SCHEDULE' (UTC)\"",
+			"exec crond -f -d 8 -c /tmp/crontabs",
+		)
+	} else {
+		lines = append(lines, "while :; do "+run+"; sleep "+strconv.Itoa(secs)+"; done")
+	}
 	one := uint64(1)
-	spec := baseSpec(t, image, secretID, secretName, networks, syncName(t.Namespace, t.Claim), script)
+	spec := baseSpec(t, image, secretID, secretName, networks, syncName(t.Namespace, t.Claim), strings.Join(lines, "\n"))
+	spec.TaskTemplate.ContainerSpec.Env = []string{"ROUND=" + round}
 	spec.Labels[labelSync] = "true"
 	spec.Labels[labelNamespace] = t.Namespace
 	spec.Labels[labelClaim] = t.Claim
-	spec.Labels[labelEvery] = strconv.Itoa(secs)
+	if schedule != "" {
+		spec.TaskTemplate.ContainerSpec.Env = append(spec.TaskTemplate.ContainerSpec.Env, "SCHEDULE="+schedule, "TZ=UTC")
+		spec.Labels[labelSchedule] = schedule
+		if gap, err := ScheduleInterval(schedule); err == nil {
+			spec.Labels[labelEvery] = strconv.Itoa(int(gap / time.Second))
+		}
+	} else {
+		spec.Labels[labelEvery] = strconv.Itoa(secs)
+	}
 	spec.Mode = swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: &one}}
 	delay := 30 * time.Second
 	spec.TaskTemplate.RestartPolicy = &swarm.RestartPolicy{Condition: swarm.RestartPolicyConditionAny, Delay: &delay}
 	return spec
+}
+
+// ParseSchedule reads a sync setting: a duration ("15m") or a 5-field cron
+// schedule ("0 1 * * *", UTC). One of the results is set.
+func ParseSchedule(v string) (every time.Duration, schedule string, err error) {
+	v = strings.TrimSpace(v)
+	if d, err := time.ParseDuration(v); err == nil {
+		if d <= 0 {
+			return 0, "", fmt.Errorf("sync interval %q must be positive", v)
+		}
+		return d, "", nil
+	}
+	if _, err := cron.ParseStandard(v); err != nil || strings.HasPrefix(v, "@") || strings.HasPrefix(v, "TZ=") || strings.HasPrefix(v, "CRON_TZ=") {
+		return 0, "", fmt.Errorf("%q is neither a duration (15m) nor a 5-field cron schedule (0 1 * * *)", v)
+	}
+	return 0, v, nil
+}
+
+// ScheduleInterval is the longest gap between two runs of a cron schedule
+// within a week: how old the copy can get between rounds.
+func ScheduleInterval(schedule string) (time.Duration, error) {
+	sc, err := cron.ParseStandard(schedule)
+	if err != nil {
+		return 0, err
+	}
+	t := sc.Next(time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC))
+	var gap time.Duration
+	end := t.Add(7 * 24 * time.Hour)
+	for t.Before(end) {
+		n := sc.Next(t)
+		if n.IsZero() {
+			break
+		}
+		if d := n.Sub(t); d > gap {
+			gap = d
+		}
+		t = n
+	}
+	return gap, nil
 }
 
 // backupCmd is the backup VolSync itself runs, so its restore picks it up.
@@ -343,6 +420,10 @@ const (
 	labelNamespace = "flux4swarm.io/volume-sync-namespace"
 	labelClaim     = "flux4swarm.io/volume-sync-claim"
 	labelEvery     = "flux4swarm.io/volume-sync-interval-seconds"
+	labelSchedule  = "flux4swarm.io/volume-sync-cron"
+	// labelRepo is a hash of the repository and the restic settings, so a
+	// sync service is replaced when they change (without showing them).
+	labelRepo = "flux4swarm.io/volume-sync-settings"
 )
 
 func baseSpec(t *Target, image, secretID, secretName string, networks []string, name, script string) swarm.ServiceSpec {
@@ -456,14 +537,14 @@ func Backup(ctx context.Context, c Client, volume string, o Options) (*Result, e
 	repo := importer.VolSyncRepository(o.Repository, t.Namespace, t.Claim)
 	res := &Result{Volume: volume, Namespace: t.Namespace, Claim: t.Claim, Repository: repo, Node: t.Node, Running: t.Running}
 	if o.Restore {
-		if o.Every > 0 {
+		if o.Every > 0 || o.Schedule != "" {
 			return nil, errors.New("a restore cannot run continuously")
 		}
 		if len(t.Running) > 0 {
 			return nil, fmt.Errorf("%s still running; stop it before restoring into volume %s", strings.Join(t.Running, ", "), volume)
 		}
 	}
-	if len(t.Running) > 0 && o.Every == 0 {
+	if len(t.Running) > 0 && !o.continuous() {
 		logf("warning: %s still running; stop it first for a consistent final copy", strings.Join(t.Running, ", "))
 	}
 
@@ -475,7 +556,7 @@ func Backup(ctx context.Context, c Client, volume string, o Options) (*Result, e
 	suffix := make([]byte, 4)
 	_, _ = rand.Read(suffix)
 	name := jobName(t.Namespace, t.Claim)
-	if o.Every > 0 {
+	if o.continuous() {
 		name = syncName(t.Namespace, t.Claim)
 	}
 	secretName := name + "-" + hex.EncodeToString(suffix)
@@ -486,14 +567,15 @@ func Backup(ctx context.Context, c Client, volume string, o Options) (*Result, e
 	if err != nil {
 		return nil, fmt.Errorf("create secret: %w", err)
 	}
-	if o.Every > 0 {
-		spec := SyncSpec(t, o.Image, sec.ID, secretName, o.Networks, o.Every, o.Keep)
+	if o.continuous() {
+		spec := SyncSpec(t, o.Image, sec.ID, secretName, o.Networks, o.Every, o.Schedule, o.Keep)
+		spec.Labels[labelRepo] = o.settingsHash()
 		if _, err := c.ServiceCreate(ctx, spec, swarm.ServiceCreateOptions{}); err != nil {
 			_ = c.SecretRemove(context.WithoutCancel(ctx), sec.ID)
 			return nil, fmt.Errorf("create sync service %s: %w", spec.Name, err)
 		}
-		logf("sync service %s backs up volume %s (claim %s/%s) to %s every %s on node %s; follow it with: docker service logs -f %s",
-			spec.Name, volume, t.Namespace, t.Claim, repo, o.Every, orAny(t.Node), spec.Name)
+		logf("sync service %s backs up volume %s (claim %s/%s) to %s %s on node %s; follow it with: docker service logs -f %s",
+			spec.Name, volume, t.Namespace, t.Claim, repo, o.When(), orAny(t.Node), spec.Name)
 		res.Service = spec.Name
 		return res, nil
 	}
@@ -612,20 +694,78 @@ func StopSync(ctx context.Context, c Client, volume string, poll time.Duration) 
 	return names, nil
 }
 
-// EnsureSync starts the sync service of the volume (Backup with o.Every)
-// unless one runs already. It returns nil when nothing was started.
+// continuous reports whether Backup starts a sync service.
+func (o Options) continuous() bool { return o.Every > 0 || o.Schedule != "" }
+
+// settingsHash identifies the repository, restic environment and image.
+func (o Options) settingsHash() string {
+	keys := make([]string, 0, len(o.Env))
+	for k := range o.Env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	h := sha256.New()
+	image := o.Image
+	if image == "" {
+		image = DefaultImage
+	}
+	keep := o.Keep
+	if keep <= 0 {
+		keep = 24
+	}
+	fmt.Fprintf(h, "%s\x00%s\x00%d\x00", o.Repository, image, keep)
+	for _, k := range keys {
+		fmt.Fprintf(h, "%s=%s\x00", k, o.Env[k])
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// When describes the rounds of a sync service, for logs.
+func (o Options) When() string {
+	if o.Schedule != "" {
+		return "at '" + o.Schedule + "' (UTC)"
+	}
+	return "every " + o.Every.String()
+}
+
+// matches reports whether sync service spec runs with the settings of o.
+func (o Options) matches(spec swarm.ServiceSpec) bool {
+	if spec.Labels[labelRepo] != o.settingsHash() {
+		return false
+	}
+	if o.Schedule != "" {
+		return spec.Labels[labelSchedule] == o.Schedule
+	}
+	secs := int(o.Every.Round(time.Second) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	return spec.Labels[labelSchedule] == "" && spec.Labels[labelEvery] == strconv.Itoa(secs)
+}
+
+// EnsureSync starts the sync service of the volume (Backup with o.Every
+// or o.Schedule) unless one runs with those settings already; one with
+// other settings is replaced. It returns nil when nothing changed.
 func EnsureSync(ctx context.Context, c Client, volume string, o Options) (*Result, error) {
-	if o.Every <= 0 {
-		return nil, errors.New("EnsureSync needs Options.Every")
+	if !o.continuous() {
+		return nil, errors.New("EnsureSync needs Options.Every or Options.Schedule")
 	}
 	services, err := c.ServiceList(ctx, swarm.ServiceListOptions{Filters: filters.NewArgs(filters.Arg("label", labelSync))})
 	if err != nil {
 		return nil, err
 	}
+	replace := false
 	for _, s := range services {
 		if s.Spec.Labels[api.LabelVolumeBackup] == volume && s.Spec.Labels[labelSync] != "" {
-			return nil, nil
+			if o.matches(s.Spec) {
+				return nil, nil
+			}
+			replace = true
 		}
 	}
-	return Backup(ctx, c, volume, o)
+	r, err := Backup(ctx, c, volume, o)
+	if r != nil {
+		r.Replaced = replace
+	}
+	return r, err
 }
