@@ -35,6 +35,10 @@ The tests are a separate Go module (`test/e2e/go.mod`, stdlib only, build tag
 
 ## Running
 
+To run everything, including tests that need a real Kubernetes cluster with
+registry access (VolSync), on a VM that Claude can drive through Remote
+Control, see [docs/development-server.md](../../docs/development-server.md).
+
 ```sh
 make e2e                      # build (if cmd/flux4swarm exists) -> up (Swarm + kind) -> test -> down
 make e2e E2E_K8S=0            # Swarm side only
