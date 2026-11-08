@@ -19,8 +19,9 @@ import (
 
 func newVolumeBackupCmd() *cobra.Command {
 	var (
-		o   volumebackup.Options
-		env []string
+		o    volumebackup.Options
+		env  []string
+		stop bool
 	)
 	cmd := &cobra.Command{
 		Use:   "volume-backup VOLUME...",
@@ -35,6 +36,11 @@ func newVolumeBackupCmd() *cobra.Command {
 			"and its secret are removed afterwards. Backups are incremental: run it while\n" +
 			"the service runs to pre-seed, then stop the service and run it again for a\n" +
 			"consistent final copy.\n\n" +
+			"With --every the copy runs continuously instead: a long-running sync service\n" +
+			"backs up every interval (pair it with import --volsync-schedule so Kubernetes\n" +
+			"restores on a schedule too). At cutover stop the service on Swarm and run\n" +
+			"volume-backup once more without --every: it removes the sync service and takes\n" +
+			"the final increment.\n\n" +
 			"The repository settings come from the environment: RESTIC_REPOSITORY (or\n" +
 			"--repository), RESTIC_PASSWORD and the --env variables (S3 credentials by\n" +
 			"default). Use the same values the secret store holds for Kubernetes.",
@@ -46,6 +52,9 @@ func newVolumeBackupCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.Node, "node", "", "run the job on this node (ID or hostname) instead of the node that runs the service")
 	cmd.Flags().StringSliceVar(&o.Networks, "network", nil, "attach the backup job to these networks, e.g. to reach a repository server running on the Swarm")
 	cmd.Flags().DurationVar(&o.Timeout, "timeout", time.Hour, "how long to wait for each backup")
+	cmd.Flags().DurationVar(&o.Every, "every", 0, "instead of one backup, start a long-running sync service that backs up incrementally at this interval (e.g. 15m) until it is stopped; a later one-off volume-backup of the volume (the final copy) or --stop removes it")
+	cmd.Flags().IntVar(&o.Keep, "keep", 24, "with --every: snapshots to keep; every --keep rounds the older ones are forgotten and pruned")
+	cmd.Flags().BoolVar(&stop, "stop", false, "remove the sync services of the volumes and do nothing else")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		o.Env = map[string]string{"RESTIC_PASSWORD": os.Getenv("RESTIC_PASSWORD")}
 		for _, k := range env {
@@ -58,14 +67,27 @@ func newVolumeBackupCmd() *cobra.Command {
 		}
 		o.Logf = func(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) }
 		// Stop waiting on Ctrl-C or SIGTERM, but still remove the job.
-		ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
+		ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
 		dc, err := dockerClient()
 		if err != nil {
 			return err
 		}
 		defer dc.Close()
 		for _, v := range args {
+			if stop {
+				names, err := volumebackup.StopSync(ctx, dc, v, 0)
+				if err != nil {
+					return err
+				}
+				if len(names) == 0 {
+					fmt.Fprintf(os.Stderr, "volume %s has no sync service\n", v)
+				}
+				for _, n := range names {
+					fmt.Printf("%s\tstopped %s\n", v, n)
+				}
+				continue
+			}
 			r, err := volumebackup.Backup(ctx, dc, v, o)
 			if err != nil {
 				return err

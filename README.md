@@ -169,7 +169,9 @@ ReplicationDestination to every PersistentVolumeClaim, and
 `flux4swarm volume-backup shop_db` copies the Swarm volume to the restic
 repository that it restores from. The copy is read through Docker with the
 volume's own driver, so NFS options, plugins and cluster volumes work the
-same as local volumes. See
+same as local volumes. For large volumes, `volume-backup --every 15m` and
+`import --volsync-schedule` keep both sides in sync incrementally, so the
+cutover only copies the last changes. See
 [docs/kubernetes-and-swarm.md](docs/kubernetes-and-swarm.md#moving-volume-data-restic--volsync).
 
 ### Keep exporting (Swarm stays the source of truth)

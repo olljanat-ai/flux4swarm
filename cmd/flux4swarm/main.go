@@ -587,6 +587,7 @@ func newImportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&exclude, "exclude", "", "regular expression of Swarm object names to skip")
 	cmd.Flags().StringSliceVar(&o.SecretEnvNames, "secret-env-name", nil, "extra env var name part (case-insensitive) whose values go to the secret store instead of Git; repeatable, added to the built-in list ("+strings.Join(importer.DefaultSecretEnvNames, ", ")+")")
 	cmd.Flags().BoolVar(&o.VolSync, "volsync", false, "also export, for every PersistentVolumeClaim, a VolSync ReplicationDestination (restic mover) and its repository ExternalSecret, so Kubernetes restores the data copied by `flux4swarm volume-backup` (needs VolSync on the cluster)")
+	cmd.Flags().StringVar(&o.VolSyncSchedule, "volsync-schedule", "", "with --volsync: cron schedule of the restores (e.g. \"*/15 * * * *\"), to keep each claim close to a continuously synced Swarm volume (volume-backup --every); default: restore once")
 	cmd.Flags().StringSliceVar(&o.VolSyncEnv, "volsync-env", importer.DefaultVolSyncEnv, "with --volsync: restic env vars, besides RESTIC_REPOSITORY and RESTIC_PASSWORD, that the repository secret carries")
 	cmd.Flags().BoolVar(&o.NoDefaultSecretEnvNames, "no-default-secret-env-names", false, "do not use the built-in --secret-env-name list; with no --secret-env-name, all env values are exported as is")
 	cmd.Flags().StringVar(&message, "commit-message", "", "commit message (default: one written from what changed, such as \"shop: api image 1.4→1.5, removed tmp-debug\")")

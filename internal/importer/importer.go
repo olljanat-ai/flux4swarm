@@ -100,6 +100,9 @@ type Options struct {
 	// RESTIC_REPOSITORY and RESTIC_PASSWORD, that the repository Secret
 	// carries (default DefaultVolSyncEnv).
 	VolSyncEnv []string
+	// VolSyncSchedule is a cron schedule for the restores; without it the
+	// ReplicationDestination restores once (manual trigger "initial").
+	VolSyncSchedule string
 }
 
 // DefaultSecretEnvNames are the well-known env var name parts that hold

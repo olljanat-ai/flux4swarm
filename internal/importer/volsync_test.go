@@ -109,3 +109,14 @@ func TestVolumeClaim(t *testing.T) {
 		}
 	}
 }
+
+func TestExportVolSyncSchedule(t *testing.T) {
+	res, err := Export(context.Background(), stackService(), Options{Cluster: "prod", VolSync: true, VolSyncSchedule: "*/15 * * * *"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rd := string(res.Files["clusters/prod/apps/shop/replicationdestination-data.yaml"])
+	if !strings.Contains(rd, "schedule: '*/15 * * * *'") || strings.Contains(rd, "manual:") {
+		t.Errorf("ReplicationDestination:\n%s", rd)
+	}
+}

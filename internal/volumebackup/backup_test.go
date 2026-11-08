@@ -202,3 +202,57 @@ func TestBackup(t *testing.T) {
 		t.Error("no error without RESTIC_PASSWORD")
 	}
 }
+
+func TestSyncSpec(t *testing.T) {
+	tg := &Target{Volume: "shop_db", Namespace: "shop", Claim: "db",
+		Mount: mount.Mount{Type: mount.TypeVolume, Source: "shop_db", Target: "/db"}, Node: "worker-1"}
+	s := SyncSpec(tg, DefaultImage, "sec", "secname", nil, 15*time.Minute, 4)
+	if s.Name != "flux4swarm-sync-shop-db" || s.Labels[labelSync] != "true" || s.Labels[api.LabelVolumeBackup] != "shop_db" {
+		t.Errorf("spec %+v", s.Annotations)
+	}
+	if s.Mode.Replicated == nil || *s.Mode.Replicated.Replicas != 1 || s.TaskTemplate.RestartPolicy.Condition != swarm.RestartPolicyConditionAny {
+		t.Errorf("mode %+v, restart %+v", s.Mode, s.TaskTemplate.RestartPolicy)
+	}
+	script := s.TaskTemplate.ContainerSpec.Command[2]
+	for _, want := range []string{
+		"while :; do",
+		"restic backup --host volsync --exclude lost+found .",
+		"if [ $((n % 4)) -eq 0 ]; then restic forget --host volsync --keep-last 4 --prune --retry-lock 10m",
+		"sleep 900",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script misses %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestBackupEveryAndStop(t *testing.T) {
+	f := &fake{
+		services: []swarm.Service{dbService(mount.Mount{Type: mount.TypeVolume, Source: "shop_db", Target: "/db"})},
+		tasks:    map[string][]swarm.Task{"db": {task("n1", swarm.TaskStateRunning, 0)}},
+	}
+	o := Options{Repository: "s3:https://s3/b", Env: map[string]string{"RESTIC_PASSWORD": "pw"}, Every: time.Minute, Poll: time.Millisecond}
+	r, err := Backup(context.Background(), f, "shop_db", o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Service != "flux4swarm-sync-shop-db" || len(f.created) != 1 || len(f.removed) != 0 {
+		t.Fatalf("result %+v, created %d, removed %v", r, len(f.created), f.removed)
+	}
+	// The sync service now exists; the final one-off backup removes it first.
+	sync := swarm.Service{ID: "sync", Spec: f.created[0]}
+	f.services = append(f.services, sync)
+	f.jobState = swarm.TaskStateComplete
+	o.Every = 0
+	if _, err := Backup(context.Background(), f, "shop_db", o); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.removed, ","); got != "service sync,secret sec,service job,secret sec" {
+		t.Errorf("removed %v", got)
+	}
+	// StopSync of a volume without one does nothing.
+	f.services = []swarm.Service{dbService(mount.Mount{Type: mount.TypeVolume, Source: "shop_db", Target: "/db"})}
+	if names, err := StopSync(context.Background(), f, "shop_db", time.Millisecond); err != nil || len(names) != 0 {
+		t.Errorf("StopSync = %v, %v", names, err)
+	}
+}

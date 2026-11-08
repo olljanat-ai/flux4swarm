@@ -181,6 +181,12 @@ kubectl -n shop run check --rm -i --restart=Never --image=alpine:3.22 \
   --overrides='{"spec":{"volumes":[{"name":"d","persistentVolumeClaim":{"claimName":"db"}}],"containers":[{"name":"check","image":"alpine:3.22","command":["sh","-c","find /d -type f | xargs head"],"volumeMounts":[{"name":"d","mountPath":"/d"}]}]}}'
 ```
 
+To test continuous sync instead, start with
+`flux4swarm volume-backup --env '' --every 1m shop_db` and export with
+`--volsync-schedule '*/2 * * * *'`. Watch the claim follow the volume, then
+cut over as in
+[Large volumes](kubernetes-and-swarm.md#large-volumes-sync-continuously-cut-over-in-minutes).
+
 To test a restore again after more backups, change the trigger:
 `kubectl -n shop patch replicationdestination db --type merge -p '{"spec":{"trigger":{"manual":"again"}}}'`.
 

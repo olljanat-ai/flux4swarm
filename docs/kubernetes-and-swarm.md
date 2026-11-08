@@ -243,6 +243,56 @@ two clusters never talk to each other.
    `import --watch`, take the workload over first (see above), because once
    the Swarm service is scaled to 0 the next export writes `replicas: 0`.
 
+#### Large volumes: sync continuously, cut over in minutes
+
+For large volumes, keep both sides in sync for as long as the service runs
+on Swarm (weeks, if needed), so the cutover only moves the last changes:
+
+* `flux4swarm volume-backup --every 15m shop_db` starts a long-running
+  sync service, `flux4swarm-sync-<namespace>-<claim>`, instead of a
+  one-off job. It runs an incremental `restic backup` every interval. Its
+  restic cache stays in the container between rounds, so a round only reads
+  file metadata and uploads what changed. Every `--keep` rounds (default
+  24) it forgets snapshots older than the last `--keep` and prunes the
+  repository. Running it again replaces the service. `--stop` removes it.
+  Follow it with `docker service logs -f flux4swarm-sync-shop-db`.
+* `import --volsync --volsync-schedule '*/15 * * * *'` writes the
+  ReplicationDestinations with that cron schedule instead of the manual
+  trigger. Each restore downloads only what changed, skips files that are
+  already right and, with `enableFileDeletion`, deletes files that are gone
+  on Swarm. The claim then trails the Swarm volume by about one interval
+  on each side. Keep the workload at 0 replicas on Kubernetes the whole
+  time.
+
+These copies come from a running service, so they are not consistent
+snapshots. They are only there to make the final copy small. Cutover:
+
+1. Take the workload over in Git (copy its manifests out of `apps/`, see
+   above). In the copy you own, replace the ReplicationDestination's
+   trigger with `manual: final`. That stops the schedule and starts one
+   restore when you apply it, so don't apply it yet.
+2. Stop the service on Swarm (`docker service scale shop_db=0`) and wait
+   until its tasks are gone. Downtime starts here.
+3. `flux4swarm volume-backup shop_db` (no `--every`): it removes the sync
+   service and backs up the final increment with the writer stopped. It
+   warns if a task still runs.
+4. Commit the `manual: final` trigger and wait for the restore:
+   `kubectl -n shop wait replicationdestination/db --for=jsonpath='{.status.lastManualSync}'=final`.
+5. Scale the workload up on Kubernetes and switch traffic. Downtime ends
+   here.
+
+After the cutover, remove the ReplicationDestination, or leave it on the
+manual trigger. A scheduled restore that runs after the cutover would
+replace the data written on Kubernetes since then with the last Swarm copy.
+
+Downtime is one incremental backup, one incremental restore and the start
+of the application. Each of those depends on how much changed since the
+last round and on how many files there are, not on the volume size. A
+restore with VolSync also reads the files already in the claim to check
+them, so measure the restore on the real volume before you plan the
+window. Restores and backups can run at the same time. While a sync
+service prunes, a restore that starts fails and VolSync retries it.
+
 A file copy of a database is only consistent when the database is
 stopped. For a short cutover window, use the database's own replication
 or dump tools instead, and use `volume-backup` for file data.

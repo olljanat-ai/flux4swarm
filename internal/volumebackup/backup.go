@@ -68,6 +68,13 @@ type Options struct {
 	// Networks are attached to the job, e.g. to reach a repository server
 	// that runs on the Swarm.
 	Networks []string
+	// Every, when set, starts a long-running sync service instead of a
+	// one-off job: it backs up the volume, sleeps Every and repeats until it
+	// is stopped (StopSync, or the next one-off Backup of the volume).
+	Every time.Duration
+	// Keep is how many snapshots a sync service keeps (default 24); every
+	// Keep rounds the older ones are forgotten and pruned.
+	Keep int
 	// Timeout bounds the wait for the job (default 1h).
 	Timeout time.Duration
 	// Poll is the task polling interval (default 2s).
@@ -83,6 +90,8 @@ type Result struct {
 	Claim      string
 	Repository string
 	Node       string
+	// Service is the sync service, when Options.Every is set.
+	Service string
 	// Running lists the services that used the volume while it was copied;
 	// a copy of a running writer may be inconsistent.
 	Running []string
@@ -238,8 +247,64 @@ func shared(m mount.Mount) bool {
 	return (d.Name != "" && d.Name != "local") || d.Options["type"] != ""
 }
 
-// JobSpec returns the replicated-job service that backs up t.
+// JobSpec returns the replicated-job service that backs up t once.
 func JobSpec(t *Target, image, secretID, secretName string, networks []string) swarm.ServiceSpec {
+	script := strings.Join([]string{
+		"set -eu",
+		"set -a; . /run/secrets/" + envFile + "; set +a",
+		"restic cat config >/dev/null 2>&1 || restic init",
+		"cd " + importer.VolSyncDataDir,
+		backupCmd,
+	}, "\n")
+	one := uint64(1)
+	spec := baseSpec(t, image, secretID, secretName, networks, jobName(t.Namespace, t.Claim), script)
+	spec.Mode = swarm.ServiceMode{ReplicatedJob: &swarm.ReplicatedJob{MaxConcurrent: &one, TotalCompletions: &one}}
+	spec.TaskTemplate.RestartPolicy = &swarm.RestartPolicy{Condition: swarm.RestartPolicyConditionNone}
+	return spec
+}
+
+// SyncSpec returns the long-running service that backs up t every
+// interval, keeping keep snapshots. Each round is incremental, and the
+// restic cache stays in the container between rounds, so a round of an
+// unchanged volume only reads file metadata.
+func SyncSpec(t *Target, image, secretID, secretName string, networks []string, every time.Duration, keep int) swarm.ServiceSpec {
+	secs := int(every.Round(time.Second) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	script := strings.Join([]string{
+		"set -u",
+		"set -a; . /run/secrets/" + envFile + "; set +a",
+		"until restic cat config >/dev/null 2>&1 || restic init; do sleep 30; done",
+		"cd " + importer.VolSyncDataDir,
+		"n=0",
+		"while :; do",
+		"  n=$((n+1))",
+		"  echo \"=== round $n: $(date -u +%FT%TZ)\"",
+		"  " + backupCmd + " || echo \"backup failed, retrying next round\"",
+		// forget and prune lock the repository exclusively, which makes a
+		// VolSync restore that runs at that moment fail and retry, so they
+		// run only every keep rounds.
+		fmt.Sprintf("  if [ $((n %% %d)) -eq 0 ]; then restic forget --host %s --keep-last %d --prune --retry-lock 10m || true; fi", keep, importer.VolSyncHost, keep),
+		fmt.Sprintf("  sleep %d", secs),
+		"done",
+	}, "\n")
+	one := uint64(1)
+	spec := baseSpec(t, image, secretID, secretName, networks, syncName(t.Namespace, t.Claim), script)
+	spec.Labels[labelSync] = "true"
+	spec.Mode = swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: &one}}
+	delay := 30 * time.Second
+	spec.TaskTemplate.RestartPolicy = &swarm.RestartPolicy{Condition: swarm.RestartPolicyConditionAny, Delay: &delay}
+	return spec
+}
+
+// backupCmd is the backup VolSync itself runs, so its restore picks it up.
+var backupCmd = "restic backup --host " + importer.VolSyncHost + " --exclude lost+found ."
+
+// labelSync marks the long-running sync services.
+const labelSync = "flux4swarm.io/volume-sync"
+
+func baseSpec(t *Target, image, secretID, secretName string, networks []string, name, script string) swarm.ServiceSpec {
 	m := t.Mount
 	m.Target = importer.VolSyncDataDir
 	m.ReadOnly = true
@@ -249,20 +314,11 @@ func JobSpec(t *Target, image, secretID, secretName string, networks []string) s
 		vo.Subpath = ""
 		m.VolumeOptions = &vo
 	}
-	script := strings.Join([]string{
-		"set -eu",
-		"set -a; . /run/secrets/" + envFile + "; set +a",
-		"restic cat config >/dev/null 2>&1 || restic init",
-		"cd " + importer.VolSyncDataDir,
-		"restic backup --host " + importer.VolSyncHost + " --exclude lost+found .",
-	}, "\n")
-	one := uint64(1)
 	spec := swarm.ServiceSpec{
 		Annotations: swarm.Annotations{
-			Name:   jobName(t.Namespace, t.Claim),
+			Name:   name,
 			Labels: map[string]string{api.LabelVolumeBackup: t.Volume, api.LabelManagedBy: api.ManagedByValue},
 		},
-		Mode: swarm.ServiceMode{ReplicatedJob: &swarm.ReplicatedJob{MaxConcurrent: &one, TotalCompletions: &one}},
 		TaskTemplate: swarm.TaskSpec{
 			ContainerSpec: &swarm.ContainerSpec{
 				Image:   image,
@@ -273,7 +329,6 @@ func JobSpec(t *Target, image, secretID, secretName string, networks []string) s
 					File: &swarm.SecretReferenceFileTarget{Name: envFile, UID: "0", GID: "0", Mode: 0o400},
 				}},
 			},
-			RestartPolicy: &swarm.RestartPolicy{Condition: swarm.RestartPolicyConditionNone},
 		},
 	}
 	for _, n := range networks {
@@ -293,8 +348,12 @@ func nodeConstraint(node string) string {
 	return "node.hostname==" + node
 }
 
-func jobName(ns, claim string) string {
-	n := "flux4swarm-backup-" + ns + "-" + claim
+func jobName(ns, claim string) string { return serviceName("flux4swarm-backup-", ns, claim) }
+
+func syncName(ns, claim string) string { return serviceName("flux4swarm-sync-", ns, claim) }
+
+func serviceName(prefix, ns, claim string) string {
+	n := prefix + ns + "-" + claim
 	if len(n) > 63 {
 		n = strings.TrimRight(n[:63], "-")
 	}
@@ -337,13 +396,25 @@ func Backup(ctx context.Context, c Client, volume string, o Options) (*Result, e
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
+	if o.Keep <= 0 {
+		o.Keep = 24
+	}
 	t, err := Plan(ctx, c, volume, o.Node)
 	if err != nil {
 		return nil, err
 	}
+	// A new sync service replaces the old one; a one-off backup is the
+	// final copy, so the sync service must not run after it.
+	stopped, err := StopSync(ctx, c, volume, o.Poll)
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range stopped {
+		logf("stopped sync service %s", n)
+	}
 	repo := importer.VolSyncRepository(o.Repository, t.Namespace, t.Claim)
 	res := &Result{Volume: volume, Namespace: t.Namespace, Claim: t.Claim, Repository: repo, Node: t.Node, Running: t.Running}
-	if len(t.Running) > 0 {
+	if len(t.Running) > 0 && o.Every == 0 {
 		logf("warning: %s still running; stop it first for a consistent final copy", strings.Join(t.Running, ", "))
 	}
 
@@ -354,13 +425,28 @@ func Backup(ctx context.Context, c Client, volume string, o Options) (*Result, e
 	env["RESTIC_REPOSITORY"] = repo
 	suffix := make([]byte, 4)
 	_, _ = rand.Read(suffix)
-	secretName := jobName(t.Namespace, t.Claim) + "-" + hex.EncodeToString(suffix)
+	name := jobName(t.Namespace, t.Claim)
+	if o.Every > 0 {
+		name = syncName(t.Namespace, t.Claim)
+	}
+	secretName := name + "-" + hex.EncodeToString(suffix)
 	sec, err := c.SecretCreate(ctx, swarm.SecretSpec{
 		Annotations: swarm.Annotations{Name: secretName, Labels: map[string]string{api.LabelVolumeBackup: volume, api.LabelManagedBy: api.ManagedByValue}},
 		Data:        EnvFile(env),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create secret: %w", err)
+	}
+	if o.Every > 0 {
+		spec := SyncSpec(t, o.Image, sec.ID, secretName, o.Networks, o.Every, o.Keep)
+		if _, err := c.ServiceCreate(ctx, spec, swarm.ServiceCreateOptions{}); err != nil {
+			_ = c.SecretRemove(context.WithoutCancel(ctx), sec.ID)
+			return nil, fmt.Errorf("create sync service %s: %w", spec.Name, err)
+		}
+		logf("sync service %s backs up volume %s (claim %s/%s) to %s every %s on node %s; follow it with: docker service logs -f %s",
+			spec.Name, volume, t.Namespace, t.Claim, repo, o.Every, orAny(t.Node), spec.Name)
+		res.Service = spec.Name
+		return res, nil
 	}
 	// Clean up even when ctx is cancelled.
 	cleanup := context.WithoutCancel(ctx)
@@ -439,4 +525,35 @@ func logs(ctx context.Context, c Client, id string) string {
 		return ""
 	}
 	return "\n" + s
+}
+
+// StopSync removes the sync services of the named volume and their secrets,
+// and returns their names.
+func StopSync(ctx context.Context, c Client, volume string, poll time.Duration) ([]string, error) {
+	if poll == 0 {
+		poll = 2 * time.Second
+	}
+	services, err := c.ServiceList(ctx, swarm.ServiceListOptions{Filters: filters.NewArgs(filters.Arg("label", labelSync))})
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, s := range services {
+		if s.Spec.Labels[api.LabelVolumeBackup] != volume || s.Spec.Labels[labelSync] == "" {
+			continue
+		}
+		if err := c.ServiceRemove(ctx, s.ID); err != nil {
+			return names, fmt.Errorf("remove sync service %s: %w", s.Spec.Name, err)
+		}
+		names = append(names, s.Spec.Name)
+		if cs := s.Spec.TaskTemplate.ContainerSpec; cs != nil {
+			for _, r := range cs.Secrets {
+				// The secret stays in use until the tasks are gone.
+				for i := 0; i < 30 && c.SecretRemove(ctx, r.SecretID) != nil; i++ {
+					time.Sleep(poll)
+				}
+			}
+		}
+	}
+	return names, nil
 }

@@ -88,14 +88,18 @@ func (e *exporter) volsync(ns, name string) {
 			e.volsyncKeys[ns] = append(e.volsyncKeys[ns], rk)
 		}
 	}
+	trigger := map[string]any{"manual": "initial"}
+	if e.o.VolSyncSchedule != "" {
+		trigger = map[string]any{"schedule": e.o.VolSyncSchedule}
+	}
 	rd := map[string]any{
 		"apiVersion": "volsync.backube/v1alpha1",
 		"kind":       "ReplicationDestination",
 		"metadata":   metav1.ObjectMeta{Name: name, Namespace: ns, Annotations: ignore},
 		"spec": map[string]any{
-			// Change the value (with a patch outside apps/) to restore again,
-			// for example the final copy at cutover.
-			"trigger": map[string]any{"manual": "initial"},
+			// Patch it outside apps/ to restore again, for example to a new
+			// manual value for the final copy at cutover.
+			"trigger": trigger,
 			"restic": map[string]any{
 				"repository":         secret,
 				"destinationPVC":     name,
