@@ -1,0 +1,6 @@
+host: 44 CPUs, 31G RAM, 6.8.0-149-generic
+docker: 29.9.3, k3s: v1.37.2+k3s1
+volsync: 0.17.0, restic image: restic/restic:0.18.1 (volume-backup default)
+flux4swarm: 4228f75
+repository: rest:http://192.168.8.151:8000/ (restic/rest-server:0.14.0)
+repository size: 10206 MB

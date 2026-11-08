@@ -1,0 +1,1 @@
+downtime per service: min 12.3s, median 12.3s, max 12.3s, mean 12.3s

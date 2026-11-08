@@ -1,0 +1,4 @@
+scenario	phase	volumes	data_mb	seconds
+a-1x10g	sync-first-round	1	10000	87.9
+a-1x10g	sync-change-visible	1	100	60.7
+a-1x10g	cutover-all	1	10000	18.3
