@@ -115,6 +115,9 @@ type Service struct {
 	// RegistryAuth overrides the applier's registry credentials (from
 	// imagePullSecrets).
 	RegistryAuth map[string]registry.AuthConfig
+	// Suspended (a suspended Kubernetes Job) is neither created nor
+	// updated; an existing service is kept as it is, and not pruned.
+	Suspended bool
 }
 
 // Desired is the state one Kustomization wants.
@@ -609,6 +612,10 @@ func (a *Applier) applyServices(ctx context.Context, desired []*Service, configs
 	for _, s := range desired {
 		name := s.Name
 		res.Inventory = append(res.Inventory, KindService+"/"+name)
+		if s.Suspended {
+			res.add(KindService, name, Unchanged, "suspended")
+			continue
+		}
 		spec, err := a.DesiredServiceSpec(s, configs, secrets, liveConfigs, liveSecrets)
 		if err != nil {
 			return err

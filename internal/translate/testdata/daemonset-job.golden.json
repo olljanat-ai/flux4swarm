@@ -1,6 +1,8 @@
 {
   "warnings": [
-    "DaemonSet monitoring/agent: privileged containers are not supported by Swarm services"
+    "DaemonSet monitoring/agent: privileged containers are not supported by Swarm services",
+    "Deployment monitoring/db: PersistentVolumeClaim \"db-data\" is not in the source; using a local volume",
+    "Deployment monitoring/db: updates start the new task before stopping the old one, so both use the same volume for a moment; use strategy Recreate or rollingUpdate.maxSurge: 0 for databases and other single-writer workloads"
   ],
   "networks": [
     {
@@ -34,6 +36,51 @@
         },
         "Mode": {
           "Global": {}
+        }
+      }
+    },
+    {
+      "name": "monitoring_db",
+      "spec": {
+        "Name": "monitoring_db",
+        "Labels": {
+          "com.docker.stack.namespace": "monitoring"
+        },
+        "TaskTemplate": {
+          "ContainerSpec": {
+            "Image": "example.com/db:1",
+            "Labels": {
+              "com.docker.stack.namespace": "monitoring"
+            },
+            "Mounts": [
+              {
+                "Type": "volume",
+                "Source": "monitoring_db-data",
+                "Target": "/var/lib/db",
+                "VolumeOptions": {
+                  "Labels": {
+                    "com.docker.stack.namespace": "monitoring"
+                  }
+                }
+              }
+            ]
+          },
+          "Networks": [
+            {
+              "Target": "monitoring_default"
+            }
+          ],
+          "ForceUpdate": 0
+        },
+        "Mode": {
+          "Replicated": {
+            "Replicas": 1
+          }
+        },
+        "UpdateConfig": {
+          "Parallelism": 1,
+          "MaxFailureRatio": 0,
+          "Order": "start-first"
         }
       }
     },
@@ -129,6 +176,39 @@
           }
         }
       }
+    },
+    {
+      "name": "monitoring_paused",
+      "spec": {
+        "Name": "monitoring_paused",
+        "Labels": {
+          "com.docker.stack.namespace": "monitoring"
+        },
+        "TaskTemplate": {
+          "ContainerSpec": {
+            "Image": "example.com/paused:1",
+            "Labels": {
+              "com.docker.stack.namespace": "monitoring"
+            }
+          },
+          "RestartPolicy": {
+            "Condition": "on-failure"
+          },
+          "Networks": [
+            {
+              "Target": "monitoring_default"
+            }
+          ],
+          "ForceUpdate": 0
+        },
+        "Mode": {
+          "ReplicatedJob": {
+            "MaxConcurrent": 1,
+            "TotalCompletions": 1
+          }
+        }
+      },
+      "suspended": true
     },
     {
       "name": "monitoring_singleton",

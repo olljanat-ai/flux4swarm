@@ -460,3 +460,35 @@ func TestVersionName(t *testing.T) {
 		t.Error("templating does not change the version name")
 	}
 }
+
+func TestSuspendedServiceIsKeptAsIs(t *testing.T) {
+	f := swarmtest.New()
+	a := applier(f)
+	ctx := context.Background()
+	job := func(image string, suspended bool) swarm.Desired {
+		return swarm.Desired{Services: []*swarm.Service{{Name: "shop_migrate", Suspended: suspended, Spec: dswarm.ServiceSpec{
+			TaskTemplate: dswarm.TaskSpec{ContainerSpec: &dswarm.ContainerSpec{Image: image}},
+			Mode:         dswarm.ServiceMode{ReplicatedJob: &dswarm.ReplicatedJob{}},
+		}}}}
+	}
+
+	// A suspended job that never ran is not created.
+	res := mustApply(t, a, job("migrate:1", true))
+	eq(t, "services", f.Names(), []string(nil))
+	eq(t, "changes", actions(res.Changes), []string{"Service/shop_migrate unchanged (suspended)"})
+	eq(t, "ids", res.ServiceIDs, map[string]string{})
+
+	// Once resumed it runs; suspending it again neither updates nor prunes it.
+	mustApply(t, a, job("migrate:1", false))
+	f.TakeCalls()
+	res = mustApply(t, a, job("migrate:2", true))
+	if calls := f.TakeCalls(); len(calls) != 0 {
+		t.Errorf("suspended job changed: %v", calls)
+	}
+	pruned, err := a.Prune(ctx, res, true)
+	if err != nil || len(pruned) != 0 {
+		t.Fatalf("pruned %v, %v", actions(pruned), err)
+	}
+	svc, _ := f.Service("shop_migrate")
+	eq(t, "image", svc.Spec.TaskTemplate.ContainerSpec.Image, "migrate:1")
+}

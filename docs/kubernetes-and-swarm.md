@@ -37,6 +37,8 @@ is useful in CI, to see what a change would drop on Swarm before it merges.
 | PVC `storageClassName` without `swarm.flux4swarm.io/volume-driver` | local volume, warning |
 | Deployment `minReadySeconds`, `progressDeadlineSeconds`, `paused`; StatefulSet `podManagementPolicy: Parallel`, `OnDelete`; Job `activeDeadlineSeconds`, `ttlSecondsAfterFinished`, indexed completion | ignored, warning |
 | `spec.healthChecks` entry for a Flux kind Swarm does not run (HelmRelease) | skipped, warning |
+| Job `suspend: true` | not started; a job service that already ran is kept as it is (not updated, not pruned) until `suspend` is removed |
+| Deployment with the default rolling update (surge) that writes to a PersistentVolumeClaim without `ReadWriteMany` | start-first update, warning: old and new task share the volume for a moment (use `Recreate` or `maxSurge: 0` for databases) |
 
 ## Autoscaling
 
@@ -62,6 +64,114 @@ Swarm has no traffic shifting, but it can roll back a failed update.
 * A manual canary with several weighted `backendRefs` in an HTTPRoute uses
   only the first backend on Swarm (warning): Traefik's Docker provider has
   no weighted services.
+
+## Database migrations
+
+Run schema migrations as a Job in a Flux Kustomization of its own, with
+`wait: true`, and let the application's Kustomization depend on it. This is
+the usual Flux pattern, and flux4swarm runs it the same way on Swarm, so one
+repository behaves the same on both platforms:
+
+```
+apps/shop/
+  release/kustomization.yaml     # kind: Component, the one version to bump
+  migrations/kustomization.yaml  # components: [../release]
+  migrations/job-api-migrate.yaml
+  app/kustomization.yaml         # components: [../release]
+  app/deployment-api.yaml
+clusters/prod/
+  shop-migrations.yaml           # Flux Kustomization: wait, force, timeout
+  shop-app.yaml                  # Flux Kustomization: dependsOn shop-migrations
+```
+
+```yaml
+# apps/shop/release/kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+images:
+  - name: registry.example.com/shop/api
+    newTag: "1.8.0"
+---
+# apps/shop/migrations/job-api-migrate.yaml
+apiVersion: batch/v1
+kind: Job
+metadata: {name: api-migrate, namespace: shop}
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: registry.example.com/shop/api   # tag from ../release
+          args: [migrate, up]
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: api-db, key: url}}
+---
+# clusters/prod/shop-migrations.yaml
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata: {name: shop-migrations, namespace: flux-system}
+spec:
+  interval: 10m
+  path: ./apps/shop/migrations
+  sourceRef: {kind: GitRepository, name: flux-system}
+  prune: true
+  wait: true     # Ready only when the job's current iteration completed
+  force: true    # Kubernetes: recreate the immutable Job when it changes
+  timeout: 30m   # longer than the slowest migration
+---
+# clusters/prod/shop-app.yaml
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata: {name: shop-app, namespace: flux-system}
+spec:
+  interval: 10m
+  path: ./apps/shop/app
+  sourceRef: {kind: GitRepository, name: flux-system}
+  prune: true
+  wait: true
+  dependsOn:
+    - name: shop-migrations
+```
+
+A release is one commit that changes `newTag`. On Swarm the Job is a
+replicated-job service: flux4swarm updates it because its spec changed,
+Swarm starts a new job iteration, and `shop-migrations` becomes Ready for
+that revision only when the iteration completed. Until then `shop-app`
+waits with `DependencyNotReady`. If the migration fails, `shop-migrations`
+fails, notifications go out and the application stays on the previous
+version. Keep the version in Git (a component or the image tags): on Swarm
+`postBuild.substituteFrom` reads its variables from the credentials
+directory, not from ConfigMaps in the repository.
+
+Rules that keep this safe:
+
+* **Backward compatible migrations (expand, then contract).** The old
+  version keeps running during the migration and after a failed one, and a
+  `git revert` of the application is safe. Drop columns a release later.
+* **Idempotent, with a lock.** flux4swarm reruns the Job whenever its spec
+  changes, including a rotated Secret (a new Secret version). Use a tool
+  that records applied versions and locks, such as Flyway, Liquibase,
+  golang-migrate, Alembic, EF Core migration bundles, Rails or Django, so
+  a rerun does nothing. A plain resync or a controller restart does not
+  rerun the Job.
+* **No `ttlSecondsAfterFinished`.** On Kubernetes the finished Job is
+  deleted and Flux creates it again on the next reconcile, which reruns the
+  migration every interval.
+* **No init containers.** They do not run on Swarm. Migrating in the
+  entrypoint only works with a locking tool, since replicas and start-first
+  updates start together.
+* **Pause with `suspend: true`.** A suspended Job is not started on Swarm,
+  and one that already ran is left alone until `suspend` is removed.
+* **Back up before destructive steps** with the database's own tool
+  (`pg_dump`, `mysqldump`), for example at the start of the Job's script. A
+  file copy of a running database volume is not a consistent backup.
+* **Databases on Swarm update stop-first.** Use a StatefulSet, or a
+  Deployment with `strategy: {type: Recreate}` or `maxSurge: 0`. The default
+  rolling update becomes start-first on Swarm and briefly runs two
+  database processes on one volume; flux4swarm warns about it.
 
 ## Repository layout for a migration
 
