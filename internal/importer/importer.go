@@ -746,6 +746,19 @@ func (e *exporter) service(s swarm.Service, netNames map[string]string, configs 
 			b := int32(*rp.MaxAttempts)
 			j.Spec.BackoffLimit = &b
 		}
+		if j.Annotations == nil {
+			j.Annotations = map[string]string{}
+		}
+		// A Job's pod template is immutable on Kubernetes: let Flux
+		// recreate it when the job changes on Swarm.
+		j.Annotations[api.AnnotationForce] = "Enabled"
+		if e.holding() {
+			// Kubernetes must not run the job (often a database
+			// migration) next to Swarm: suspended until cut over.
+			suspend := true
+			j.Spec.Suspend = &suspend
+			j.Annotations[api.AnnotationHeldJob] = "true"
+		}
 		obj = j
 		file += "job-" + name + ".yaml"
 	default:

@@ -298,6 +298,13 @@ turns the check off.
 Start from `MIGRATION.md`: a service with no blockers can move as it is;
 the others list what to change on Swarm first (see
 [the README](../README.md#migration-readiness-report)).
+Jobs need a decision of their own. Every exported Job carries
+`kustomize.toolkit.fluxcd.io/force: Enabled`, so Flux recreates it when the
+job changes on Swarm (a Job's pod template is immutable on Kubernetes).
+Without `--volsync` Flux runs it on Kubernetes as soon as it is applied, so
+a database migration that Swarm also runs must be idempotent with a lock
+(see [Database migrations](#database-migrations)), or be excluded until its
+service moves; `MIGRATION.md` lists a check for every job.
 When a workload should run only on Kubernetes, copy its manifests from
 `apps/` into `platform/` (or another directory you own) and remove the
 service from Swarm, or keep it on Swarm and `--exclude` it from the export.
@@ -329,7 +336,10 @@ two clusters never talk to each other.
 2. The export keeps every workload that mounts a claim at 0 replicas on
    Kubernetes (annotation `flux4swarm.io/held-replicas` keeps the Swarm
    count) until it is cut over: the restore and the application must not
-   use the claim at the same time.
+   use the claim at the same time. Jobs (Swarm replicated-jobs, often
+   database migrations) are exported with `suspend: true` and the
+   annotation `flux4swarm.io/held-job` for the same reason; Swarm keeps
+   running them, and the cutover export releases them.
 3. Copy the data from Swarm with the same settings in the environment:
 
    ```sh

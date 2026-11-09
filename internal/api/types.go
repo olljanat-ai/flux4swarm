@@ -65,6 +65,14 @@ const (
 	// AnnotationHeld on an exported Deployment records the Swarm replicas
 	// while Kubernetes holds it at 0 until its volumes are migrated.
 	AnnotationHeld = "flux4swarm.io/held-replicas"
+	// AnnotationHeldJob on an exported Job marks its spec.suspend as a
+	// hold for Kubernetes only: Kubernetes does not start it until it is
+	// cut over, while Swarm keeps running it.
+	AnnotationHeldJob = "flux4swarm.io/held-job"
+	// AnnotationForce is Flux's per-object force annotation: Flux
+	// recreates the object when a change to an immutable field (a Job's
+	// pod template) cannot be applied.
+	AnnotationForce = "kustomize.toolkit.fluxcd.io/force"
 	// LabelVolumeSyncSchedule on a Swarm service sets how its volumes are
 	// synced by import --volsync-sync[-schedule]: a duration ("15m") or a
 	// 5-field cron schedule in UTC ("0 1 * * *"), overriding the flags.

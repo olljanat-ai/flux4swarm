@@ -92,6 +92,14 @@ func (e *exporter) report() {
 		spec := e.original[s.swarm]
 		cs := spec.TaskTemplate.ContainerSpec
 
+		if spec.Mode.ReplicatedJob != nil || spec.Mode.GlobalJob != nil {
+			if e.holding() {
+				add(Check, "is a job: it is suspended on Kubernetes until it is cut over, so a database migration does not run from both platforms")
+			} else {
+				add(Check, "is a job: Flux runs it on Kubernetes too as soon as it is applied; if it migrates a database that Swarm still uses, make the migration idempotent with a lock, or exclude it until the cutover")
+			}
+		}
+
 		// Mounts.
 		for _, m := range cs.Mounts {
 			switch m.Type {
