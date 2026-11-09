@@ -102,6 +102,8 @@ type ksState struct {
 	next     time.Time
 	// appliedRevision of the source at last successful apply.
 	appliedRevision string
+	// seenRevision of the source at the last reconcile, whatever its result.
+	seenRevision string
 	// workloads maps "Kind/namespace/name" of the workloads of the last
 	// build to their Swarm service names, so health checks in other
 	// Kustomizations can find them.
@@ -341,9 +343,14 @@ func (c *Controller) pass(ctx context.Context, force bool) {
 	}
 }
 
+// sourceMovedLocked reports whether the source has a revision the
+// Kustomization has not been reconciled with yet. Like Flux, a new revision
+// reconciles the Kustomization right away, also when it is not Ready: the
+// new commit may be the fix it is waiting for. A revision that was tried
+// already waits for the interval (or retryInterval).
 func (c *Controller) sourceMovedLocked(s *ksState) bool {
 	src := c.sourceForLocked(s.obj)
-	return src != nil && src.artifact != nil && src.artifact.Revision != s.appliedRevision && s.status.IsReady()
+	return src != nil && src.artifact != nil && src.artifact.Revision != s.seenRevision
 }
 
 // ksOrder sorts Kustomizations so that dependencies come first.
@@ -488,7 +495,7 @@ func (c *Controller) newFetcher(obj any) (fetcher, error) {
 			URL:  o.Spec.URL,
 			Ref:  ref,
 			Auth: auth,
-			Dir:  filepath.Join(c.opts.CacheDir, "gitrepository", o.Metadata.Namespace+"-"+o.Metadata.Name),
+			Dir:  filepath.Join(c.opts.CacheDir, "gitrepository", o.Metadata.Namespace, o.Metadata.Name),
 		}, nil
 	case *api.OCIRepository:
 		return c.newOCIFetcher(o)
@@ -510,7 +517,7 @@ func (c *Controller) newOCIFetcher(o *api.OCIRepository) (*oci.Fetcher, error) {
 	f := &oci.Fetcher{
 		URL:      o.Spec.URL,
 		Insecure: o.Spec.Insecure,
-		Dir:      filepath.Join(c.opts.CacheDir, "ocirepository", o.Metadata.Namespace+"-"+o.Metadata.Name),
+		Dir:      filepath.Join(c.opts.CacheDir, "ocirepository", o.Metadata.Namespace, o.Metadata.Name),
 	}
 	if r := o.Spec.Ref; r != nil {
 		f.Ref = oci.Ref{Digest: r.Digest, SemVer: r.SemVer, SemverFilter: r.SemverFilter, Tag: r.Tag}
@@ -580,12 +587,16 @@ func (c *Controller) reconcileKustomization(ctx context.Context, key string, onc
 		log.Error("reconciliation failed", "reason", reason, "error", err)
 		c.emitKustomizationFailureLocked(obj, s.status.LastAttemptedRevision, reason, err.Error())
 	}
+	src := c.sourceForLocked(obj)
+	s.seenRevision = ""
+	if src != nil && src.artifact != nil {
+		s.seenRevision = src.artifact.Revision
+	}
 	if c.markSuspendedLocked(key, obj.Spec.Suspend, &s.status) {
 		s.next = time.Now().Add(interval(obj.Spec.Interval.Duration))
 		c.mu.Unlock()
 		return
 	}
-	src := c.sourceForLocked(obj)
 	if msg := c.dependenciesNotReadyLocked(obj, src); msg != "" {
 		s.status.LastReconcile = time.Now().UTC()
 		s.status.setReady(ConditionFalse, ReasonDependencyNotReady, msg)
@@ -820,30 +831,7 @@ func (c *Controller) registerChildren(ctx context.Context, s *ksState, key strin
 			keep = append(keep, child)
 			continue
 		}
-		if n, ok := c.notif[child]; ok && n.origin == key {
-			c.removeNotificationLocked(child)
-			c.opts.Log.Info("removed notification object", "object", child)
-		}
-		delete(c.suspended, child)
-		if src, ok := c.sources[child]; ok && src.origin == key {
-			delete(c.sources, child)
-			c.metrics.forget(src.status.Kind, src.status.Namespace, src.status.Name)
-			c.opts.Log.Info("removed source", "object", child)
-		}
-		if ks, ok := c.kustomization[child]; ok && ks.origin == key {
-			delete(c.kustomization, child)
-			c.metrics.forget(ks.status.Kind, ks.status.Namespace, ks.status.Name)
-			c.opts.Log.Info("removed kustomization", "object", child)
-			if ks.obj.Spec.Prune {
-				a := &swarm.Applier{
-					Client: c.opts.Docker, DryRun: c.opts.DryRun, Log: c.opts.Log,
-					Owner: swarm.Owner{Name: ks.obj.Metadata.Name, Namespace: ks.obj.Metadata.Namespace},
-				}
-				if _, err := a.Prune(ctx, &swarm.Result{}, true); err != nil {
-					c.opts.Log.Error("garbage collection failed", "object", child, "error", err)
-				}
-			}
-		}
+		c.removeChildLocked(ctx, child, key)
 	}
 	for k := range now {
 		if k != key {
@@ -852,6 +840,45 @@ func (c *Controller) registerChildren(ctx context.Context, s *ksState, key strin
 	}
 	sort.Strings(keep)
 	s.children = keep
+}
+
+// removeChildLocked removes a Flux object that left the build of owner, the
+// Kustomization that registered it. A Kustomization with prune takes its
+// Swarm objects and the Flux objects it registered itself with it, as
+// deleting a Kustomization does in Flux; otherwise they would be reconciled
+// forever with no parent left to remove them. c.mu must be held.
+func (c *Controller) removeChildLocked(ctx context.Context, child, owner string) {
+	if n, ok := c.notif[child]; ok && n.origin == owner {
+		c.removeNotificationLocked(child)
+		c.opts.Log.Info("removed notification object", "object", child)
+	}
+	if src, ok := c.sources[child]; ok && src.origin == owner {
+		delete(c.sources, child)
+		delete(c.suspended, child)
+		c.metrics.forget(src.status.Kind, src.status.Namespace, src.status.Name)
+		c.opts.Log.Info("removed source", "object", child)
+	}
+	ks, ok := c.kustomization[child]
+	if !ok || ks.origin != owner {
+		return
+	}
+	delete(c.kustomization, child)
+	delete(c.suspended, child)
+	c.metrics.forget(ks.status.Kind, ks.status.Namespace, ks.status.Name)
+	c.opts.Log.Info("removed kustomization", "object", child)
+	if !ks.obj.Spec.Prune {
+		return
+	}
+	for _, grandchild := range ks.children {
+		c.removeChildLocked(ctx, grandchild, child)
+	}
+	a := &swarm.Applier{
+		Client: c.opts.Docker, DryRun: c.opts.DryRun, Log: c.opts.Log,
+		Owner: swarm.Owner{Name: ks.obj.Metadata.Name, Namespace: ks.obj.Metadata.Namespace},
+	}
+	if _, err := a.Prune(ctx, &swarm.Result{}, true); err != nil {
+		c.opts.Log.Error("garbage collection failed", "object", child, "error", err)
+	}
 }
 
 // Status returns a snapshot of every object's status.

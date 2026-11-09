@@ -352,7 +352,7 @@
             "uid": "${datasource}"
           },
           "refId": "A",
-          "expr": "sum(rate(controller_runtime_reconcile_total{controller=~\"kustomization|gitrepository\"}[5m])) * 60",
+          "expr": "sum(rate(controller_runtime_reconcile_total{controller=~\"kustomization|gitrepository|ocirepository\"}[5m])) * 60",
           "instant": true
         }
       ],
@@ -408,7 +408,7 @@
             "uid": "${datasource}"
           },
           "refId": "A",
-          "expr": "sum(rate(controller_runtime_reconcile_errors_total{controller=~\"kustomization|gitrepository\"}[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(controller_runtime_reconcile_errors_total{controller=~\"kustomization|gitrepository|ocirepository\"}[5m])) * 60 or vector(0)",
           "instant": true
         }
       ],
@@ -731,7 +731,7 @@
             "uid": "${datasource}"
           },
           "refId": "A",
-          "expr": "sum by (controller, result) (rate(controller_runtime_reconcile_total{controller=~\"kustomization|gitrepository\"}[$__rate_interval])) * 60",
+          "expr": "sum by (controller, result) (rate(controller_runtime_reconcile_total{controller=~\"kustomization|gitrepository|ocirepository\"}[$__rate_interval])) * 60",
           "legendFormat": "{{controller}} {{result}}"
         }
       ],

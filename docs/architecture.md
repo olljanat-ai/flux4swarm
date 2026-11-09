@@ -100,7 +100,13 @@ Swarm and apply to the Docker Engine API".
 GitRepository, OCIRepository and Kustomization objects found in a build are registered
 with the controller, which gives the usual self-managing `flux-system`
 setup. They are garbage collected when removed from Git if the parent has
-`prune: true`.
+`prune: true`. A removed Kustomization with `prune: true` takes its Swarm
+objects and the Flux objects it registered itself with it, like the cascade
+of a delete in Flux.
+
+A new revision of a source reconciles the Kustomizations that use it right
+away, also the ones that are not Ready, so a fix does not wait for the
+retry interval.
 
 ## Translation
 
@@ -228,9 +234,9 @@ service-spec annotation).
   another Kustomization applied: the Swarm service name comes from the
   build that applied the workload (so `swarm.flux4swarm.io/name` works),
   else from the `NS_name` convention, and the service is checked like
-  `spec.wait` does. Kustomization and GitRepository entries must be Ready.
-  Kinds with no Swarm meaning (Service, ConfigMap, ...) count as healthy;
-  other Flux kinds (HelmRelease, ...) are rejected.
+  `spec.wait` does. Kustomization, GitRepository and OCIRepository entries
+  must be Ready. Kinds with no Swarm meaning (Service, ConfigMap, ...) count
+  as healthy; other Flux kinds (HelmRelease, ...) are skipped with a warning.
 * **dependsOn** waits until each dependency is Ready and, when it uses the
   same source, has applied the source's current revision, like
   kustomize-controller.

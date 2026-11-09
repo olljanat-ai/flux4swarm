@@ -14,11 +14,11 @@ Swarm.
 
 | Metric | Type | Labels | Flux source |
 |--------|------|--------|-------------|
-| `gotk_resource_info` | gauge, always 1 | `customresource_group`, `customresource_kind`, `customresource_version`, `exported_namespace`, `name`, `ready`, `reason`, `suspended`, `revision`, `url` (GitRepository), `source_name` (Kustomization) | kube-state-metrics custom resource config of flux2-monitoring-example |
+| `gotk_resource_info` | gauge, always 1 | `customresource_group`, `customresource_kind`, `customresource_version`, `exported_namespace`, `name`, `ready`, `reason`, `suspended`, `revision`, `url` (GitRepository, OCIRepository), `source_name` (Kustomization) | kube-state-metrics custom resource config of flux2-monitoring-example |
 | `gotk_reconcile_duration_seconds` | histogram | `kind`, `name`, `namespace` | `fluxcd/pkg/runtime/metrics`, same buckets |
 | `gotk_reconcile_condition` | gauge | `kind`, `name`, `namespace`, `type="Ready"`, `status` (`True`, `False`, `Unknown`) | `fluxcd/pkg/runtime/metrics` (deprecated in Flux 2.1, kept for older dashboards) |
 | `gotk_suspend_status` | gauge | `kind`, `name`, `namespace` | `fluxcd/pkg/runtime/metrics` (deprecated in Flux 2.1) |
-| `controller_runtime_reconcile_total` | counter | `controller` (`gitrepository`, `kustomization`), `result` (`success`, `error`, `requeue_after`) | controller-runtime |
+| `controller_runtime_reconcile_total` | counter | `controller` (`gitrepository`, `ocirepository`, `kustomization`), `result` (`success`, `error`, `requeue_after`) | controller-runtime |
 | `controller_runtime_reconcile_errors_total` | counter | `controller` | controller-runtime |
 | `controller_runtime_reconcile_time_seconds` | histogram | `controller` | controller-runtime |
 | `controller_runtime_max_concurrent_reconciles` | gauge | `controller` | controller-runtime |

@@ -23,7 +23,13 @@ import (
 // fluxGroupVersion maps kinds to their Flux API group and version.
 var fluxGroupVersion = map[string][2]string{
 	api.KindGitRepository: {"source.toolkit.fluxcd.io", "v1"},
+	api.KindOCIRepository: {"source.toolkit.fluxcd.io", "v1"},
 	api.KindKustomization: {"kustomize.toolkit.fluxcd.io", "v1"},
+}
+
+// controllers are the controller-runtime controller names with series.
+var controllers = []string{
+	controllerName(api.KindGitRepository), controllerName(api.KindOCIRepository), controllerName(api.KindKustomization),
 }
 
 // controller-runtime reconcile results.
@@ -88,7 +94,7 @@ func newMetrics(c *Controller) *metrics {
 	)
 	// Pre-create the series like controller-runtime does, so rate() and
 	// absent() based alerts work before the first error.
-	for _, ctrl := range []string{controllerName(api.KindGitRepository), controllerName(api.KindKustomization)} {
+	for _, ctrl := range controllers {
 		for _, r := range []string{resultSuccess, resultError, resultRequeueAfter} {
 			m.total.WithLabelValues(ctrl, r)
 		}
@@ -144,7 +150,7 @@ func (stateCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (s stateCollector) Collect(ch chan<- prometheus.Metric) {
-	for _, ctrl := range []string{controllerName(api.KindGitRepository), controllerName(api.KindKustomization)} {
+	for _, ctrl := range controllers {
 		ch <- prometheus.MustNewConstMetric(maxConcurrentDesc, prometheus.GaugeValue, 1, ctrl)
 	}
 	for _, o := range s.c.resourceInfo() {
