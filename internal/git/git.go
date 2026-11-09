@@ -17,11 +17,19 @@ import (
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp/capability"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/storage/memory"
 
 	"github.com/olljanat-ai/flux4swarm/internal/source"
 )
+
+func init() {
+	// Azure DevOps answers 400 to an upload-pack request that does not
+	// offer multi_ack/multi_ack_detailed, which go-git leaves out by
+	// default. Offer them (only thin-pack stays unsupported), as Flux does.
+	transport.UnsupportedCapabilities = []capability.Capability{capability.ThinPack}
+}
 
 // Ref selects what to check out. At most one of Branch, Tag, SemVer, Name
 // and Commit should be set; Commit may be combined with Branch. Like Flux,
