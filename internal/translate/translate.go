@@ -183,7 +183,8 @@ func Workloads(set *api.Set) []*Workload {
 		out = append(out, &Workload{Kind: "Job", Namespace: j.Namespace, Name: j.Name, Labels: j.Labels,
 			Annotations: j.Annotations, Template: j.Spec.Template, Completions: j.Spec.Completions,
 			Parallelism: j.Spec.Parallelism, BackoffLimit: j.Spec.BackoffLimit, Unsupported: un,
-			Suspend: j.Spec.Suspend != nil && *j.Spec.Suspend})
+			// A hold from import is for Kubernetes only.
+			Suspend: j.Spec.Suspend != nil && *j.Spec.Suspend && j.Annotations[api.AnnotationHeldJob] != "true"})
 	}
 	canaries := map[string]api.Canary{}
 	for _, c := range set.Canaries {

@@ -8,9 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/swarm"
 
 	"github.com/olljanat-ai/flux4swarm/internal/api"
+	swarmapply "github.com/olljanat-ai/flux4swarm/internal/swarm"
 )
 
 func TestExportVolSync(t *testing.T) {
@@ -223,5 +225,86 @@ func TestExportVolSyncRestoreFirst(t *testing.T) {
 	}
 	if err := Validate(root, res.Root); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// jobService is a stack with one replicated-job, such as a database
+// migration.
+func jobService() *fakeDocker {
+	one := uint64(1)
+	stack := map[string]string{"com.docker.stack.namespace": "shop"}
+	return &fakeDocker{
+		networks: []network.Summary{{ID: "net1", Name: "shop_default", Scope: "swarm", Driver: "overlay", Labels: stack}},
+		services: []swarm.Service{{ID: "job1", Spec: swarm.ServiceSpec{
+			Annotations: swarm.Annotations{Name: "shop_migrate", Labels: stack},
+			TaskTemplate: swarm.TaskSpec{
+				ContainerSpec: &swarm.ContainerSpec{Image: "shop/api:1.8.0", Args: []string{"migrate", "up"}, Labels: stack},
+				RestartPolicy: &swarm.RestartPolicy{Condition: swarm.RestartPolicyConditionOnFailure, MaxAttempts: &one},
+				Networks:      []swarm.NetworkAttachmentConfig{{Target: "net1"}},
+			},
+			Mode: swarm.ServiceMode{ReplicatedJob: &swarm.ReplicatedJob{MaxConcurrent: &one, TotalCompletions: &one}},
+		}}},
+	}
+}
+
+func TestExportJobs(t *testing.T) {
+	const file = "clusters/prod/apps/shop/job-migrate.yaml"
+	findings := func(res *Result) string {
+		var out []string
+		for _, s := range res.Report.Services {
+			for _, f := range s.Findings {
+				out = append(out, f.Text)
+			}
+		}
+		return strings.Join(out, "\n")
+	}
+	desired := func(res *Result) *swarmapply.Service {
+		for _, s := range res.Desired.Services {
+			if s.Name == "shop_migrate" {
+				return s
+			}
+		}
+		t.Fatalf("no shop_migrate in %+v", res.Desired.Services)
+		return nil
+	}
+
+	// Without VolSync the Job runs on Kubernetes too: Flux may recreate
+	// it, and the report says so.
+	res, err := Export(context.Background(), jobService(), Options{Cluster: "prod"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := string(res.Files[file])
+	if !strings.Contains(job, api.AnnotationForce+": Enabled") || strings.Contains(job, "suspend") {
+		t.Errorf("job:\n%s", job)
+	}
+	if f := findings(res); !strings.Contains(f, "Flux runs it on Kubernetes too") {
+		t.Errorf("findings:\n%s", f)
+	}
+
+	// With VolSync it is suspended on Kubernetes until the cutover, but
+	// still runs on Swarm.
+	res, err = Export(context.Background(), jobService(), Options{Cluster: "prod", VolSync: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job = string(res.Files[file])
+	if !strings.Contains(job, "suspend: true") || !strings.Contains(job, api.AnnotationHeldJob+`: "true"`) {
+		t.Errorf("job not held:\n%s", job)
+	}
+	if s := desired(res); s.Suspended {
+		t.Error("held job is suspended on Swarm")
+	}
+	if f := findings(res); !strings.Contains(f, "suspended on Kubernetes until it is cut over") {
+		t.Errorf("findings:\n%s", f)
+	}
+
+	// The cutover releases it.
+	res, err = Export(context.Background(), jobService(), Options{Cluster: "prod", VolSync: true, VolSyncCutover: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job := string(res.Files[file]); strings.Contains(job, "suspend") || strings.Contains(job, api.AnnotationHeldJob) {
+		t.Errorf("cutover job still held:\n%s", job)
 	}
 }

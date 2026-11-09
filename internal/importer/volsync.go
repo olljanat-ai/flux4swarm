@@ -34,10 +34,17 @@ const (
 // VolSyncFinal is the manual trigger of the final restore at cutover.
 const VolSyncFinal = "final"
 
+// holding reports whether the export holds workloads on Kubernetes until
+// they are cut over: with VolSync, except for the cutover itself and for
+// clusters that restore first.
+func (e *exporter) holding() bool {
+	return e.o.VolSync && !e.o.VolSyncCutover && !e.o.VolSyncRestoreFirst
+}
+
 // held reports whether a workload with this pod waits on Kubernetes for a
 // VolSync restore: with VolSync, every workload that mounts a claim.
 func (e *exporter) held(pod corev1.PodSpec) bool {
-	if !e.o.VolSync || e.o.VolSyncCutover || e.o.VolSyncRestoreFirst {
+	if !e.holding() {
 		return false
 	}
 	for _, v := range pod.Volumes {
@@ -136,7 +143,7 @@ func (e *exporter) volsync(ns, name string) {
 	dir := e.nsDir(ns)
 	e.add(dir+"/externalsecret-"+secret+".yaml", es)
 	e.add(dir+"/replicationdestination-"+name+".yaml", rd)
-	hold := " Workloads that mount a claim are held at 0 replicas on Kubernetes (annotation " + api.AnnotationHeld + " keeps the Swarm count) until they are cut over with `import --migrate`."
+	hold := " Workloads that mount a claim are held at 0 replicas on Kubernetes (annotation " + api.AnnotationHeld + " keeps the Swarm count), and Jobs are suspended (annotation " + api.AnnotationHeldJob + "), until they are cut over with `import --migrate`."
 	if e.o.VolSyncRestoreFirst || e.o.VolSyncCutover {
 		hold = ""
 	}
