@@ -58,7 +58,7 @@ type healthCheck struct {
 // healthy:
 //   - Deployment, StatefulSet, DaemonSet: the Swarm service converged;
 //   - Job: the replicated job completed;
-//   - Kustomization, GitRepository: Ready (their status cannot change while
+//   - Kustomization, GitRepository, OCIRepository: Ready (their status cannot change while
 //     this Kustomization reconciles, so they are checked once).
 //
 // Workloads may belong to any Kustomization; their Swarm service name comes
@@ -82,7 +82,7 @@ func (c *Controller) healthChecks(ctx context.Context, key string, ks *api.Kusto
 			checks = append(checks, healthCheck{name: id + " (service " + svc + ")", check: func(ctx context.Context) (swarm.Health, error) {
 				return swarm.CheckService(ctx, c.opts.Docker, svc)
 			}})
-		case ref.Kind == api.KindKustomization || ref.Kind == api.KindGitRepository || ref.Kind == LocalSourceKind:
+		case ref.Kind == api.KindKustomization || ref.Kind == api.KindGitRepository || ref.Kind == api.KindOCIRepository || ref.Kind == LocalSourceKind:
 			if msg := c.fluxObjectNotReady(key, ref.Kind, ns, ref.Name); msg != "" {
 				notReady = append(notReady, id+": "+msg)
 			}
@@ -117,7 +117,7 @@ func skippedHealthChecks(ks *api.Kustomization) []string {
 	var out []string
 	for _, ref := range ks.Spec.HealthChecks {
 		group, _, _ := strings.Cut(ref.APIVersion, "/")
-		if !strings.HasSuffix(group, ".fluxcd.io") || ref.Kind == api.KindKustomization || ref.Kind == api.KindGitRepository {
+		if !strings.HasSuffix(group, ".fluxcd.io") || ref.Kind == api.KindKustomization || ref.Kind == api.KindGitRepository || ref.Kind == api.KindOCIRepository {
 			continue
 		}
 		ns := ref.Namespace

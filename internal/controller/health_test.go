@@ -76,6 +76,10 @@ func TestHealthChecks(t *testing.T) {
 	db.workloads = map[string]string{workloadKey("Deployment", "demo", "db"): "custom-db"}
 	db.status.setReady(ConditionTrue, ReasonSucceeded, "ok")
 	c.kustomization[ksKey(api.DefaultNamespace, "broken")].status.setReady(ConditionFalse, ReasonBuildFailed, "boom")
+	c.AddOCIRepository(&api.OCIRepository{Metadata: api.ObjectMeta{Name: "artifacts", Namespace: api.DefaultNamespace}})
+	c.AddOCIRepository(&api.OCIRepository{Metadata: api.ObjectMeta{Name: "unreachable", Namespace: api.DefaultNamespace}})
+	c.sources[srcKey(api.KindOCIRepository, api.DefaultNamespace, "artifacts")].status.setReady(ConditionTrue, ReasonSucceeded, "ok")
+	c.sources[srcKey(api.KindOCIRepository, api.DefaultNamespace, "unreachable")].status.setReady(ConditionFalse, ReasonOCIPullFailed, "no route")
 	self := ksKey(api.DefaultNamespace, "app")
 
 	ref := func(apiVersion, kind, ns, name string) api.CrossNamespaceObjectReference {
@@ -94,6 +98,8 @@ func TestHealthChecks(t *testing.T) {
 		{name: "missing service", checks: []api.CrossNamespaceObjectReference{ref("batch/v1", "Job", "demo", "gone")}, wantErr: "service not found"},
 		{name: "kustomization not ready", checks: []api.CrossNamespaceObjectReference{ref(api.KustomizeGroupVersion, api.KindKustomization, "", "broken")}, wantErr: "boom"},
 		{name: "kustomization missing", checks: []api.CrossNamespaceObjectReference{ref(api.KustomizeGroupVersion, api.KindKustomization, "", "nope")}, wantErr: "not found"},
+		{name: "ready ocirepository", checks: []api.CrossNamespaceObjectReference{ref(api.SourceGroupVersion, api.KindOCIRepository, "", "artifacts")}},
+		{name: "ocirepository not ready", checks: []api.CrossNamespaceObjectReference{ref(api.SourceGroupVersion, api.KindOCIRepository, "", "unreachable")}, wantErr: "no route"},
 		{name: "flux kind swarm does not run is skipped", checks: []api.CrossNamespaceObjectReference{ref("helm.toolkit.fluxcd.io/v2", "HelmRelease", "demo", "x")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -151,6 +157,8 @@ func TestSkippedHealthChecks(t *testing.T) {
 	k.Spec.HealthChecks = []api.CrossNamespaceObjectReference{
 		{APIVersion: "helm.toolkit.fluxcd.io/v2", Kind: "HelmRelease", Name: "x"},
 		{APIVersion: api.KustomizeGroupVersion, Kind: api.KindKustomization, Name: "db"},
+		{APIVersion: api.SourceGroupVersion, Kind: api.KindGitRepository, Name: "flux-system"},
+		{APIVersion: api.SourceGroupVersion, Kind: api.KindOCIRepository, Name: "artifacts"},
 		{APIVersion: "apps/v1", Kind: "Deployment", Name: "web"},
 	}
 	got := skippedHealthChecks(k)

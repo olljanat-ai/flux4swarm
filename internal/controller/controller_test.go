@@ -15,6 +15,7 @@ import (
 
 	"github.com/olljanat-ai/flux4swarm/internal/api"
 	"github.com/olljanat-ai/flux4swarm/internal/creds"
+	"github.com/olljanat-ai/flux4swarm/internal/git"
 	"github.com/olljanat-ai/flux4swarm/internal/swarm"
 	"github.com/olljanat-ai/flux4swarm/internal/swarm/swarmtest"
 )
@@ -380,6 +381,141 @@ spec:
 	}
 	if _, ok := e.docker.Service("shop_db"); !ok {
 		t.Errorf("sibling's service removed: %v", e.docker.Names())
+	}
+}
+
+// A Kustomization that leaves the source takes the Kustomizations it
+// registered itself with it, like the cascade of a delete in Flux.
+func TestRemovedKustomizationRemovesItsChildren(t *testing.T) {
+	e := newEnv(t)
+	child := func(name, path string, prune bool) string {
+		return `apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata: {name: ` + name + `, namespace: flux-system}
+spec:
+  interval: 1m
+  path: ./` + path + `
+  prune: ` + fmt.Sprint(prune) + `
+  sourceRef: {kind: LocalDirectory, name: local}
+`
+	}
+	write(t, e.root, "clusters/apps.yaml", child("apps", "apps", true))
+	write(t, e.root, "clusters/keep.yaml", child("keep", "keep", false))
+	write(t, e.root, "clusters/db.yaml", deploymentYAML("db", "postgres"))
+	write(t, e.root, "apps/web.yaml", child("web", "web", true))
+	write(t, e.root, "web/web.yaml", deploymentYAML("web", "nginx"))
+	write(t, e.root, "keep/cache.yaml", child("cache", "cache", true))
+	write(t, e.root, "cache/cache.yaml", deploymentYAML("cache", "redis"))
+	e.c.AddKustomization(kustomization("root", "./clusters"))
+	if err := e.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"shop_web", "shop_cache", "shop_db"} {
+		if _, ok := e.docker.Service(n); !ok {
+			t.Fatalf("%s not applied: %v", n, e.docker.Names())
+		}
+	}
+
+	for _, f := range []string{"clusters/apps.yaml", "clusters/keep.yaml"} {
+		if err := os.Remove(filepath.Join(e.root, f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	registered := map[string]bool{}
+	for _, s := range e.c.Status() {
+		registered[s.Name] = true
+	}
+	if registered["apps"] || registered["web"] {
+		t.Errorf("apps and its child web must be gone: %v", registered)
+	}
+	if _, ok := e.docker.Service("shop_web"); ok {
+		t.Errorf("service of the removed grandchild still runs: %v", e.docker.Names())
+	}
+	// keep has prune: false, so what it applied (the cache Kustomization)
+	// is left alone, as in Flux.
+	if registered["keep"] || !registered["cache"] {
+		t.Errorf("keep must be gone and its child cache left alone: %v", registered)
+	}
+	for _, n := range []string{"shop_cache", "shop_db"} {
+		if _, ok := e.docker.Service(n); !ok {
+			t.Errorf("%s removed: %v", n, e.docker.Names())
+		}
+	}
+}
+
+// A new source revision reconciles a failed Kustomization right away
+// instead of after its retry interval; the same revision is not retried on
+// every pass.
+func TestNewRevisionRetriesFailedKustomization(t *testing.T) {
+	e := newEnv(t)
+	write(t, e.root, "app/web.yaml", "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: [broken\n")
+	e.c.AddKustomization(kustomization("app", "./app", func(s *api.KustomizationSpec) {
+		s.Interval = api.Duration{Duration: time.Hour}
+	}))
+	ctx := context.Background()
+	e.c.pass(ctx, false)
+	failed := e.status(api.KindKustomization, "app")
+	if failed.IsReady() || failed.Ready.Reason != ReasonBuildFailed {
+		t.Fatalf("want a failed build: %+v", failed.Ready)
+	}
+
+	// The fix is in the checkout, but the source still has the revision
+	// that failed: wait for the retry interval.
+	write(t, e.root, "app/web.yaml", deploymentYAML("web", "nginx"))
+	e.c.pass(ctx, false)
+	if st := e.status(api.KindKustomization, "app"); st.IsReady() || !st.LastReconcile.Equal(failed.LastReconcile) {
+		t.Fatalf("reconciled the same revision again: %+v", st.Ready)
+	}
+
+	e.c.mu.Lock()
+	src := e.c.sources[srcKey(LocalSourceKind, api.DefaultNamespace, "local")]
+	fixed := *src.artifact
+	fixed.Revision = "main@sha1:fixed"
+	src.artifact = &fixed
+	e.c.mu.Unlock()
+	e.c.pass(ctx, false)
+	st := e.status(api.KindKustomization, "app")
+	if !st.IsReady() || st.LastAppliedRevision != "main@sha1:fixed" {
+		t.Fatalf("new revision not reconciled: %+v", st.Ready)
+	}
+	if _, ok := e.docker.Service("shop_web"); !ok {
+		t.Errorf("not applied: %v", e.docker.Names())
+	}
+
+	// A suspended Kustomization sees a new revision once and stays quiet.
+	if err := e.c.SetSuspended(api.KindKustomization, api.DefaultNamespace, "app", true); err != nil {
+		t.Fatal(err)
+	}
+	e.c.mu.Lock()
+	next := *src.artifact
+	next.Revision = "main@sha1:next"
+	src.artifact = &next
+	e.c.mu.Unlock()
+	e.c.pass(ctx, false)
+	e.c.mu.Lock()
+	moved := e.c.sourceMovedLocked(e.c.kustomization[ksKey(api.DefaultNamespace, "app")])
+	e.c.mu.Unlock()
+	if moved {
+		t.Error("suspended Kustomization is due on every pass")
+	}
+}
+
+// Sources whose namespace and name join to the same string keep separate
+// checkouts.
+func TestSourceCacheDirsDoNotCollide(t *testing.T) {
+	c := New(Options{CacheDir: t.TempDir()})
+	dir := func(ns, name string) string {
+		f, err := c.newFetcher(&api.GitRepository{Metadata: api.ObjectMeta{Namespace: ns, Name: name}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f.(*git.Fetcher).Dir
+	}
+	if a, b := dir("team-a", "app"), dir("team", "a-app"); a == b {
+		t.Errorf("both sources use %s", a)
 	}
 }
 
