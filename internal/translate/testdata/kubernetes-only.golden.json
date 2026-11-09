@@ -7,6 +7,7 @@
     "Deployment shop/web: projected volume \"token\" is not supported on Swarm; its mount at /var/run/token was skipped (supported: configMap, secret, emptyDir, hostPath, persistentVolumeClaim)",
     "Deployment shop/web: target of Flagger flagger.app/v1beta1 Canary shop/web; canary analysis is not supported on Swarm, a failed update rolls back",
     "Deployment shop/web: autoscaled by autoscaling/v2 HorizontalPodAutoscaler shop/web; autoscaling is not supported on Swarm, it runs minReplicas (3)",
+    "Deployment shop/web: updates start the new task before stopping the old one, so both use the same volume for a moment; use strategy Recreate or rollingUpdate.maxSurge: 0 for databases and other single-writer workloads",
     "Deployment shop/worker: autoscaled by keda.sh/v1alpha1 ScaledObject shop/worker; autoscaling is not supported on Swarm, it runs minReplicas (1)"
   ],
   "networks": [

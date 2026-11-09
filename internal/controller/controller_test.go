@@ -9,9 +9,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	dswarm "github.com/docker/docker/api/types/swarm"
 
 	"github.com/olljanat-ai/flux4swarm/internal/api"
 	"github.com/olljanat-ai/flux4swarm/internal/creds"
@@ -554,5 +557,80 @@ spec:
 				t.Errorf("objects created: %v", n)
 			}
 		})
+	}
+}
+
+// TestMigrationJobGatesApp is the documented database migration pattern:
+// a Kustomization with the migration Job and wait, and the application's
+// Kustomization depending on it. The application only rolls out after the
+// job's iteration for the same revision completed, and stays on the old
+// version when the migration fails.
+func TestMigrationJobGatesApp(t *testing.T) {
+	e := newEnv(t)
+	release := func(version string) {
+		write(t, e.root, "migrations/job.yaml", `apiVersion: batch/v1
+kind: Job
+metadata: {name: migrate, namespace: shop}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers: [{name: migrate, image: "shop/api:`+version+`", args: [migrate, up]}]
+`)
+		write(t, e.root, "app/api.yaml", deploymentYAML("api", "shop/api:"+version))
+	}
+	e.c.AddKustomization(kustomization("app", "./app", func(s *api.KustomizationSpec) {
+		s.DependsOn = []api.DependencyReference{{Name: "migrations"}}
+	}))
+	e.c.AddKustomization(kustomization("migrations", "./migrations", func(s *api.KustomizationSpec) {
+		s.Wait = true
+		s.Force = true
+		s.Timeout = &api.Duration{Duration: 5 * time.Second}
+	}))
+	image := func() string {
+		svc, ok := e.docker.Service("shop_api")
+		if !ok {
+			return ""
+		}
+		return svc.Spec.TaskTemplate.ContainerSpec.Image
+	}
+
+	// The migration runs first, then the application.
+	release("1")
+	e.docker.JobTaskState = dswarm.TaskStateComplete
+	if err := e.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	calls := e.docker.TakeCalls()
+	job, app := slices.Index(calls, "ServiceCreate shop_migrate"), slices.Index(calls, "ServiceCreate shop_api")
+	if job < 0 || app < 0 || job > app {
+		t.Fatalf("calls %v: the migration must run before the application", calls)
+	}
+
+	// A failed migration keeps the application on the old version.
+	release("2")
+	e.docker.JobTaskState = dswarm.TaskStateFailed
+	if err := e.reconcile(); err == nil {
+		t.Fatal("want an error")
+	}
+	if st := e.status(api.KindKustomization, "migrations"); st.IsReady() || !strings.Contains(st.Ready.Message, "job failed") {
+		t.Errorf("migrations: %+v", st.Ready)
+	}
+	if st := e.status(api.KindKustomization, "app"); st.IsReady() || st.Ready.Reason != ReasonDependencyNotReady {
+		t.Errorf("app: %+v", st.Ready)
+	}
+	if img := image(); img != "shop/api:1" {
+		t.Errorf("application updated to %s before its migration succeeded", img)
+	}
+
+	// A fixed release reruns the migration and then rolls the application.
+	release("3")
+	e.docker.JobTaskState = dswarm.TaskStateComplete
+	if err := e.reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if img := image(); img != "shop/api:3" {
+		t.Errorf("application on %s, want shop/api:3", img)
 	}
 }

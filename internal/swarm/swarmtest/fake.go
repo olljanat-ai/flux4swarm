@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
@@ -37,8 +38,13 @@ type Fake struct {
 	// the start of ServiceUpdate with the stored service, which it may
 	// change, e.g. to bump its version like a finished rolling update.
 	BeforeServiceUpdate func(s *swarm.Service)
+	// JobTaskState, when set, runs every created or updated job service
+	// at once: a new job iteration with one task that ended in this
+	// state (swarm.TaskStateComplete or swarm.TaskStateFailed).
+	JobTaskState swarm.TaskState
 
-	seq int
+	Tasks []swarm.Task
+	seq   int
 }
 
 // New returns an empty swarm with the cluster ID "test-cluster".
@@ -148,6 +154,7 @@ func (f *Fake) ServiceCreate(_ context.Context, spec swarm.ServiceSpec, _ swarm.
 	}
 	id := f.id("svc")
 	f.Services = append(f.Services, swarm.Service{ID: id, Meta: swarm.Meta{Version: swarm.Version{Index: 1}}, Spec: spec})
+	f.runJob(&f.Services[len(f.Services)-1])
 	f.record("ServiceCreate", spec.Name)
 	return swarm.ServiceCreateResponse{ID: id}, nil
 }
@@ -174,6 +181,7 @@ func (f *Fake) ServiceUpdate(_ context.Context, id string, v swarm.Version, spec
 		s.Spec = spec
 		s.Version.Index++
 		f.Services[i] = s
+		f.runJob(&f.Services[i])
 		f.record("ServiceUpdate", spec.Name)
 		return swarm.ServiceUpdateResponse{}, nil
 	}
@@ -193,8 +201,49 @@ func (f *Fake) ServiceRemove(_ context.Context, id string) error {
 	return fmt.Errorf("service %s not found", id)
 }
 
-func (f *Fake) TaskList(context.Context, swarm.TaskListOptions) ([]swarm.Task, error) {
-	return nil, nil
+// runJob starts a new iteration of a job service with JobTaskState.
+func (f *Fake) runJob(s *swarm.Service) {
+	if f.JobTaskState == "" || (s.Spec.Mode.ReplicatedJob == nil && s.Spec.Mode.GlobalJob == nil) {
+		return
+	}
+	iter := uint64(1)
+	if s.JobStatus != nil {
+		iter = s.JobStatus.JobIteration.Index + 1
+	}
+	// Well in the past, so the health check sees a settled job.
+	at := time.Now().Add(-time.Hour)
+	s.JobStatus = &swarm.JobStatus{JobIteration: swarm.Version{Index: iter}, LastExecution: at}
+	t := swarm.Task{ID: f.id("task"), ServiceID: s.ID, JobIteration: &swarm.Version{Index: iter},
+		Status: swarm.TaskStatus{State: f.JobTaskState, Timestamp: at}}
+	t.UpdatedAt = at
+	if f.JobTaskState == swarm.TaskStateFailed {
+		t.Status.Err = "exit code 1"
+	}
+	f.Tasks = append(f.Tasks, t)
+}
+
+// TaskList returns the tasks of the services in the "service" filter, or
+// all tasks.
+func (f *Fake) TaskList(_ context.Context, o swarm.TaskListOptions) ([]swarm.Task, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []swarm.Task
+	for _, t := range f.Tasks {
+		if ids := o.Filters.Get("service"); len(ids) > 0 && !contains(ids, t.ServiceID) {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+func contains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *Fake) NodeList(context.Context, swarm.NodeListOptions) ([]swarm.Node, error) {

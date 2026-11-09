@@ -68,6 +68,8 @@ type Workload struct {
 	Completions  *int32
 	Parallelism  *int32
 	BackoffLimit *int32
+	// Suspend is a Job's spec.suspend: the job must not start.
+	Suspend bool
 
 	// Unsupported lists workload fields that have no Swarm equivalent.
 	Unsupported []string
@@ -180,7 +182,8 @@ func Workloads(set *api.Set) []*Workload {
 		}
 		out = append(out, &Workload{Kind: "Job", Namespace: j.Namespace, Name: j.Name, Labels: j.Labels,
 			Annotations: j.Annotations, Template: j.Spec.Template, Completions: j.Spec.Completions,
-			Parallelism: j.Spec.Parallelism, BackoffLimit: j.Spec.BackoffLimit, Unsupported: un})
+			Parallelism: j.Spec.Parallelism, BackoffLimit: j.Spec.BackoffLimit, Unsupported: un,
+			Suspend: j.Spec.Suspend != nil && *j.Spec.Suspend})
 	}
 	canaries := map[string]api.Canary{}
 	for _, c := range set.Canaries {
@@ -531,7 +534,42 @@ func (t *translator) workload(w *Workload) (*swarmapply.Service, error) {
 	if len(spec.Labels) == 0 {
 		spec.Labels = nil
 	}
-	return &swarmapply.Service{Name: name, Spec: spec, RegistryAuth: auths}, nil
+	if u := spec.UpdateConfig; u != nil && u.Order == swarm.UpdateOrderStartFirst && w.Kind != "Job" && t.writesSingleClaim(w, c) {
+		t.warn("%s %s/%s: updates start the new task before stopping the old one, so both use the same volume for a moment; "+
+			"use strategy Recreate or rollingUpdate.maxSurge: 0 for databases and other single-writer workloads",
+			w.Kind, w.Namespace, w.Name)
+	}
+	return &swarmapply.Service{Name: name, Spec: spec, RegistryAuth: auths, Suspended: w.Suspend}, nil
+}
+
+// writesSingleClaim reports whether container c writes to a
+// PersistentVolumeClaim that is not shared (no ReadWriteMany access mode),
+// so two tasks must not use it at the same time.
+func (t *translator) writesSingleClaim(w *Workload, c corev1.Container) bool {
+	claims := map[string]string{}
+	for _, v := range w.Template.Spec.Volumes {
+		if v.PersistentVolumeClaim != nil && !v.PersistentVolumeClaim.ReadOnly {
+			claims[v.Name] = v.PersistentVolumeClaim.ClaimName
+		}
+	}
+	for _, vm := range c.VolumeMounts {
+		claim, ok := claims[vm.Name]
+		if !ok || vm.ReadOnly {
+			continue
+		}
+		shared := false
+		if p := t.pvcs[w.Namespace+"/"+claim]; p != nil {
+			for _, m := range p.Spec.AccessModes {
+				if m == corev1.ReadWriteMany {
+					shared = true
+				}
+			}
+		}
+		if !shared {
+			return true
+		}
+	}
+	return false
 }
 
 // ApplyPatch applies a JSON merge patch (YAML is accepted) to spec.

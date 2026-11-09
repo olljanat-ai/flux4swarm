@@ -129,7 +129,7 @@ so in-cluster DNS names keep working.
 | Deployment `replicas` | `Mode.Replicated.Replicas` |
 | DaemonSet | `Mode.Global` |
 | StatefulSet | replicated; `volumeClaimTemplates` become volumes `<ns>_<tpl>-<sts>-{{.Task.Slot}}` |
-| Job `parallelism`/`completions`/`backoffLimit`, `restartPolicy` | `Mode.ReplicatedJob`, `RestartPolicy` |
+| Job `parallelism`/`completions`/`backoffLimit`, `restartPolicy` | `Mode.ReplicatedJob`, `RestartPolicy`; `suspend: true` keeps it from starting (see [database migrations](kubernetes-and-swarm.md#database-migrations)) |
 | Deployment strategy with surge (default) | `UpdateConfig{Parallelism: 1, Order: start-first}`; `maxSurge: 0` keeps the Swarm default |
 | target of a Flagger Canary | `UpdateConfig.FailureAction: rollback` (Monitor = `analysis.interval`) |
 | HorizontalPodAutoscaler / KEDA ScaledObject target without `replicas` | `minReplicas` replicas |

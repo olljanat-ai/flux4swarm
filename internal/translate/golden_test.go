@@ -48,6 +48,7 @@ type goldenService struct {
 	Name         string                         `json:"name"`
 	Spec         swarm.ServiceSpec              `json:"spec"`
 	RegistryAuth map[string]registry.AuthConfig `json:"registryAuth,omitempty"`
+	Suspended    bool                           `json:"suspended,omitempty"`
 }
 
 func view(out *translate.Output) golden {
@@ -66,7 +67,7 @@ func view(out *translate.Output) golden {
 		if len(auth) == 0 {
 			auth = nil
 		}
-		g.Services = append(g.Services, goldenService{Name: s.Name, Spec: s.Spec, RegistryAuth: auth})
+		g.Services = append(g.Services, goldenService{Name: s.Name, Spec: s.Spec, RegistryAuth: auth, Suspended: s.Suspended})
 	}
 	return g
 }

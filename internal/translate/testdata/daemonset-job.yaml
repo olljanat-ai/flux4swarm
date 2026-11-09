@@ -59,3 +59,31 @@ spec:
     metadata: {labels: {app: nosurge}}
     spec:
       containers: [{name: s, image: example.com/nosurge:1}]
+---
+# A suspended Job is translated but not started on Swarm.
+apiVersion: batch/v1
+kind: Job
+metadata: {name: paused, namespace: monitoring}
+spec:
+  suspend: true
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers: [{name: paused, image: example.com/paused:1}]
+---
+# A database with the default (surge) strategy: start-first on one volume.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: db, namespace: monitoring}
+spec:
+  selector: {matchLabels: {app: db}}
+  template:
+    metadata: {labels: {app: db}}
+    spec:
+      containers:
+        - name: db
+          image: example.com/db:1
+          volumeMounts: [{name: data, mountPath: /var/lib/db}]
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: db-data}
