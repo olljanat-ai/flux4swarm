@@ -1382,7 +1382,7 @@ func cleanYAML(b []byte) []byte {
 		}
 		delete(m, "status")
 		prune(m)
-		c, err := yaml.Marshal(m)
+		c, err := marshalLiteral(m)
 		if err != nil {
 			out = append(out, doc)
 			continue
