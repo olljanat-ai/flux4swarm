@@ -366,6 +366,28 @@ two clusters never talk to each other.
    `import --watch`, let `--migrate` do this (see
    [Automated](#automated-sync-and-cutover-with-import---watch)).
 
+#### Repository: S3 or Azure Blob Storage
+
+Any restic repository works: flux4swarm passes `RESTIC_REPOSITORY` to
+restic as is (adding `/<namespace>/<claim>`) and the credential variables
+named by `--volsync-env` (`import`) or `--env` (`volume-backup`) to restic on
+Swarm and, through the ExternalSecrets, to VolSync on Kubernetes. The
+default list is the S3 one.
+
+| | S3 compatible (default) | Azure Blob Storage |
+|---|---|---|
+| `RESTIC_REPOSITORY` | `s3:https://s3.example.com/bucket/swarm-prod` | `azure:<container>:/swarm-prod` |
+| Credential variables | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `AZURE_ACCOUNT_NAME`, `AZURE_ACCOUNT_KEY` |
+| Flag | none | `--volsync-env AZURE_ACCOUNT_NAME,AZURE_ACCOUNT_KEY` (`volume-backup`: `--env`) |
+| Secret store keys | `volsync-aws-access-key-id`, `volsync-aws-secret-access-key` | `volsync-azure-account-name`, `volsync-azure-account-key` |
+
+`volsync-restic-repository` and `volsync-restic-password` are needed in
+both cases (all keys after `--secret-key-prefix`). Create the Azure
+container before the first backup. Each setting can also be read from a
+file: `RESTIC_PASSWORD_FILE=/run/secrets/...` and so on, which is how
+[deploy/flux4swarm-export-stack.yaml](../deploy/flux4swarm-export-stack.yaml)
+reads them from Docker secrets.
+
 #### Large volumes: sync continuously, cut over in minutes
 
 For large volumes, keep both sides in sync for as long as the service runs
@@ -440,7 +462,10 @@ flux4swarm import --watch --cluster prod --bootstrap \
   settings come from the environment of the watcher, the same values the
   secret store holds for Kubernetes. Run the watcher on a manager with
   access to the repository. A sync service whose interval, schedule or
-  restic settings no longer match is replaced.
+  restic settings no longer match is replaced. Each one keeps the last
+  `--volsync-keep` snapshots (default 24): every `--volsync-keep` rounds
+  it forgets the older ones and prunes, so between N and 2N-1 snapshots
+  exist at any time.
 * Very large volumes can be copied outside business hours instead: give
   `--volsync-sync` a 5-field cron schedule in UTC, or put the label
   `flux4swarm.io/volume-sync-schedule` on the Swarm services that need it.

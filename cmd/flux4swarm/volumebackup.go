@@ -43,10 +43,13 @@ func newVolumeBackupCmd() *cobra.Command {
 			"the final increment.\n\n" +
 			"The repository settings come from the environment: RESTIC_REPOSITORY (or\n" +
 			"--repository), RESTIC_PASSWORD and the --env variables (S3 credentials by\n" +
-			"default). Use the same values the secret store holds for Kubernetes.",
+			"default). Use the same values the secret store holds for Kubernetes. Each\n" +
+			"of them can instead be read from a file named by <NAME>_FILE, e.g.\n" +
+			"RESTIC_PASSWORD_FILE=/run/secrets/restic_password for a Docker secret.",
 		Args: cobra.MinimumNArgs(1),
 	}
-	cmd.Flags().StringVar(&o.Repository, "repository", os.Getenv("RESTIC_REPOSITORY"), "base restic repository, e.g. s3:https://s3.example.com/bucket/swarm-prod (env RESTIC_REPOSITORY)")
+	repo, _ := resticEnv("RESTIC_REPOSITORY")
+	cmd.Flags().StringVar(&o.Repository, "repository", repo, "base restic repository, e.g. s3:https://s3.example.com/bucket/swarm-prod (env RESTIC_REPOSITORY)")
 	cmd.Flags().StringSliceVar(&env, "env", importer.DefaultVolSyncEnv, "environment variables passed to restic besides RESTIC_PASSWORD (same list as import --volsync-env)")
 	cmd.Flags().StringVar(&o.Image, "image", volumebackup.DefaultImage, "restic image of the backup job")
 	cmd.Flags().StringVar(&o.Node, "node", "", "run the job on this node (ID or hostname) instead of the node that runs the service")
@@ -66,12 +69,13 @@ func newVolumeBackupCmd() *cobra.Command {
 				return fmt.Errorf("--schedule %q is not a 5-field cron schedule", o.Schedule)
 			}
 		}
-		o.Env = map[string]string{"RESTIC_PASSWORD": os.Getenv("RESTIC_PASSWORD")}
+		password, _ := resticEnv("RESTIC_PASSWORD")
+		o.Env = map[string]string{"RESTIC_PASSWORD": password}
 		for _, k := range env {
 			if k = strings.TrimSpace(k); k == "" {
 				continue
 			}
-			if v, ok := os.LookupEnv(k); ok {
+			if v, ok := resticEnv(k); ok {
 				o.Env[k] = v
 			}
 		}
@@ -107,4 +111,23 @@ func newVolumeBackupCmd() *cobra.Command {
 		return nil
 	}
 	return cmd
+}
+
+// resticEnv returns the restic setting name from the environment or, when it
+// is not set, from the file that name_FILE points to (a Docker secret such as
+// /run/secrets/restic_password), without the trailing newline.
+func resticEnv(name string) (string, bool) {
+	if v, ok := os.LookupEnv(name); ok {
+		return v, true
+	}
+	f := os.Getenv(name + "_FILE")
+	if f == "" {
+		return "", false
+	}
+	b, err := os.ReadFile(f)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %s_FILE: %v\n", name, err)
+		return "", false
+	}
+	return strings.TrimRight(string(b), "\r\n"), true
 }
