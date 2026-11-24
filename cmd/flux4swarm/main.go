@@ -603,6 +603,7 @@ func newImportCmd() *cobra.Command {
 		basePath       string
 		migrateOn      bool
 		volsyncSync    string
+		volsyncKeep    int
 	)
 	cmd := &cobra.Command{
 		Use:   "import",
@@ -636,6 +637,7 @@ func newImportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.VolSyncSchedule, "volsync-schedule", "", "with --volsync: cron schedule of the restores (e.g. \"*/15 * * * *\"), to keep each claim close to a continuously synced Swarm volume (volume-backup --every); default: restore once")
 	cmd.Flags().StringSliceVar(&o.VolSyncEnv, "volsync-env", importer.DefaultVolSyncEnv, "with --volsync: restic env vars, besides RESTIC_REPOSITORY and RESTIC_PASSWORD, that the repository secret carries")
 	cmd.Flags().StringVar(&volsyncSync, "volsync-sync", "", "implies --volsync: keep a sync service running on Swarm for every exported volume, backing it up at this interval (\"15m\") or on this 5-field cron schedule in UTC (\"0 1 * * *\", e.g. outside business hours), and restore on Kubernetes on a matching --volsync-schedule (derived when not set); the Swarm service label "+api.LabelVolumeSyncSchedule+" overrides it per service (and starts sync services for labelled services with plain --volsync); the restic settings come from RESTIC_REPOSITORY, RESTIC_PASSWORD and the --volsync-env variables, or from the files their <NAME>_FILE variables name (Docker secrets)")
+	cmd.Flags().IntVar(&volsyncKeep, "volsync-keep", 24, "with --volsync-sync: snapshots each sync service keeps (e.g. 7 with a nightly schedule for a week); every --volsync-keep rounds the older ones are forgotten and pruned")
 	cmd.Flags().BoolVar(&o.VolSyncRestoreFirst, "volsync-restore-first", false, "implies --volsync, for a Kubernetes cluster built from scratch from the export (e.g. a nightly test cluster): write the claims and their one-off restores to <path>/"+importer.DataDir+" and Flux Kustomizations (<path>/"+importer.LayersFile+") that apply them first, wait until every claim is restored and only then start apps/ at the real replica counts; pair it with --volsync-sync so each rebuild gets data at most one sync interval old")
 	cmd.Flags().BoolVar(&migrateOn, "migrate", false, "cut over services labelled "+api.LabelMigrate+"="+api.MigrateKubernetes+" one by one: stop them on Swarm, back up the last increment of their volumes, and hand them to Kubernetes in <path>/"+migrate.Dir+"/ (where they stay; a migrated service is kept at 0 replicas on Swarm)")
 	cmd.Flags().BoolVar(&o.NoDefaultSecretEnvNames, "no-default-secret-env-names", false, "do not use the built-in --secret-env-name list; with no --secret-env-name, all env values are exported as is")
@@ -708,7 +710,7 @@ func newImportCmd() *cobra.Command {
 		// The restic settings of the sync services and the final backups.
 		repo, _ := resticEnv("RESTIC_REPOSITORY")
 		password, _ := resticEnv("RESTIC_PASSWORD")
-		bo := volumebackup.Options{Repository: repo, Env: map[string]string{"RESTIC_PASSWORD": password}}
+		bo := volumebackup.Options{Repository: repo, Env: map[string]string{"RESTIC_PASSWORD": password}, Keep: volsyncKeep}
 		for _, k := range importer.VolSyncEnv(o.VolSyncEnv) {
 			if v, ok := resticEnv(k); ok && k != "RESTIC_REPOSITORY" {
 				bo.Env[k] = v

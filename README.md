@@ -247,8 +247,11 @@ flux4swarm import --watch --cluster prod --bootstrap --git-url https://github.co
 To run it as a Swarm service see
 [deploy/flux4swarm-export-stack.yaml](deploy/flux4swarm-export-stack.yaml),
 which also backs up every exported volume with restic each night at 01:00
-UTC (`--volsync-sync "0 1 * * *"`, restic settings from Docker secrets
-through `RESTIC_PASSWORD_FILE` and friends).
+UTC and keeps a week of snapshots (`--volsync-sync "0 1 * * *"
+--volsync-keep 7`), to Azure Blob Storage or S3 (see
+[Repository: S3 or Azure Blob Storage](docs/kubernetes-and-swarm.md#repository-s3-or-azure-blob-storage)),
+with the restic settings read from Docker secrets through
+`RESTIC_PASSWORD_FILE` and friends.
 A failed export is retried, so watch mode never exits on an expired token or
 a rejected push. It serves `/healthz`, `/status` and `/metrics` on
 `--listen` (default `:9797`); `/healthz` fails once no export succeeded for

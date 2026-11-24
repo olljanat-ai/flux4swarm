@@ -4,8 +4,8 @@
 #   docker secret create flux4swarm-export_username - <<< "git"
 #   docker secret create flux4swarm-export_password - <<< "<PAT with write access>"
 #   docker secret create flux4swarm-export_restic_password - <<< "<restic password>"
-#   docker secret create flux4swarm-export_aws_access_key_id - <<< "<S3 key>"
-#   docker secret create flux4swarm-export_aws_secret_access_key - <<< "<S3 secret>"
+#   docker secret create flux4swarm-export_azure_account_name - <<< "<storage account>"
+#   docker secret create flux4swarm-export_azure_account_key - <<< "<storage account key>"
 #   docker stack deploy -c deploy/flux4swarm-export-stack.yaml flux4swarm-export
 # The export owns clusters/<cluster>/apps only; see
 # docs/kubernetes-and-swarm.md for where Kubernetes-only additions go.
@@ -19,11 +19,20 @@
 # Backups: --volsync-sync keeps a sync service running for every exported
 # volume that backs it up with restic to <RESTIC_REPOSITORY>/<namespace>/<claim>
 # every night at 01:00 UTC (5-field cron, always UTC; an interval such as
-# "1h" works too). These are the snapshots that VolSync restores on
-# Kubernetes and that `flux4swarm volume-backup --restore` rolls back to (see
+# "1h" works too), keeping the last --volsync-keep snapshots: 7 nights here.
+# The older ones are forgotten and pruned every 7th night, so between 7 and
+# 13 exist. These are the snapshots that VolSync restores on Kubernetes and
+# that `flux4swarm volume-backup --restore` rolls back to (see
 # examples/nightly-test-clusters). The export then also writes the VolSync
 # objects; the secret store must hold the same restic settings. The
 # Flux4SwarmVolumeSync* alerts in deploy/monitoring cover failing backups.
+# The repository here is Azure Blob Storage (create the container first).
+# For S3 instead, drop "--volsync-env" and its value, set
+#   RESTIC_REPOSITORY: s3:https://s3.example.com/backups/swarm-prod
+#   AWS_ACCESS_KEY_ID_FILE: /run/secrets/flux4swarm-export_aws_access_key_id
+#   AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/flux4swarm-export_aws_secret_access_key
+# and use those two secrets in place of the azure ones. See
+# docs/kubernetes-and-swarm.md#repository-s3-or-azure-blob-storage.
 version: "3.8"
 services:
   export:
@@ -31,23 +40,25 @@ services:
     command: ["import", "--watch", "--cluster", "prod", "--bootstrap",
       "--git-url", "https://github.com/acme/fleet", "--branch", "main",
       "--git-secret", "flux4swarm-export", "--exclude", "^flux4swarm-export_",
-      "--secret-store-provider", "vault", "--volsync-sync", "0 1 * * *",
+      "--secret-store-provider", "vault",
+      "--volsync-sync", "0 1 * * *", "--volsync-keep", "7",
+      "--volsync-env", "AZURE_ACCOUNT_NAME,AZURE_ACCOUNT_KEY",
       "--log-format", "json"]
     environment:
       FLUX4SWARM_DEFAULT_NAMESPACE: default
       # Restic settings of the backups; *_FILE reads them from the secrets.
-      RESTIC_REPOSITORY: s3:https://s3.example.com/backups/swarm-prod
+      RESTIC_REPOSITORY: azure:backups:/swarm-prod
       RESTIC_PASSWORD_FILE: /run/secrets/flux4swarm-export_restic_password
-      AWS_ACCESS_KEY_ID_FILE: /run/secrets/flux4swarm-export_aws_access_key_id
-      AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/flux4swarm-export_aws_secret_access_key
+      AZURE_ACCOUNT_NAME_FILE: /run/secrets/flux4swarm-export_azure_account_name
+      AZURE_ACCOUNT_KEY_FILE: /run/secrets/flux4swarm-export_azure_account_key
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     secrets:
       - flux4swarm-export_username
       - flux4swarm-export_password
       - flux4swarm-export_restic_password
-      - flux4swarm-export_aws_access_key_id
-      - flux4swarm-export_aws_secret_access_key
+      - flux4swarm-export_azure_account_name
+      - flux4swarm-export_azure_account_key
     deploy:
       replicas: 1
       placement:
@@ -59,7 +70,7 @@ secrets:
     external: true
   flux4swarm-export_restic_password:
     external: true
-  flux4swarm-export_aws_access_key_id:
+  flux4swarm-export_azure_account_name:
     external: true
-  flux4swarm-export_aws_secret_access_key:
+  flux4swarm-export_azure_account_key:
     external: true
