@@ -208,7 +208,8 @@ the workload, and keeps it stopped on Swarm until it is rolled back. Every
 step is logged and recorded in `migrated/<namespace>/<name>/MIGRATED.md`.
 `--volsync-restore-first` instead builds clusters from scratch, such as a
 nightly test cluster, that restore the newest data before the applications
-start. See
+start ([CI examples](examples/nightly-test-clusters/README.md) for Azure
+DevOps and GitHub Actions, with Kubernetes or Swarm as the target). See
 [docs/kubernetes-and-swarm.md](docs/kubernetes-and-swarm.md#moving-volume-data-restic--volsync)
 and the [metrics and dashboard](docs/monitoring.md#volume-sync-and-migration).
 [docs/performance.md](docs/performance.md) has measured times for one 10 GB

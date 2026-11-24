@@ -606,6 +606,13 @@ and let Flux create them again. It can't be combined with
 `--volsync-schedule` or `--merge`. Several watchers can share the Swarm: a
 volume has one sync service, which every cluster restores from.
 
+[examples/nightly-test-clusters](../examples/nightly-test-clusters/README.md)
+has Azure DevOps pipelines and GitHub Actions workflows that do the rebuild
+every night, for a Kubernetes cluster (recreate it, install the add-ons
+and Flux, wait for `data` and `apps`) and for a test Swarm (reconcile a
+plain export with the workloads at 0, `volume-backup --restore` every
+volume, then start the workloads).
+
 ## Several environments: one shared base
 
 Most teams run the same stacks on several Swarms, for example development,
