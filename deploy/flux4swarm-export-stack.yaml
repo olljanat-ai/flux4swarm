@@ -3,6 +3,9 @@
 # change is committed to Git, where Flux on Kubernetes picks it up.
 #   docker secret create flux4swarm-export_username - <<< "git"
 #   docker secret create flux4swarm-export_password - <<< "<PAT with write access>"
+#   docker secret create flux4swarm-export_restic_password - <<< "<restic password>"
+#   docker secret create flux4swarm-export_aws_access_key_id - <<< "<S3 key>"
+#   docker secret create flux4swarm-export_aws_secret_access_key - <<< "<S3 secret>"
 #   docker stack deploy -c deploy/flux4swarm-export-stack.yaml flux4swarm-export
 # The export owns clusters/<cluster>/apps only; see
 # docs/kubernetes-and-swarm.md for where Kubernetes-only additions go.
@@ -13,6 +16,14 @@
 # With several Swarms sharing a Kustomize base, deploy this on each one with
 # its own --cluster and add the same "--merge", "<env>" list everywhere, e.g.
 # "--merge", "development", "--merge", "acceptance", "--merge", "production".
+# Backups: --volsync-sync keeps a sync service running for every exported
+# volume that backs it up with restic to <RESTIC_REPOSITORY>/<namespace>/<claim>
+# every night at 01:00 UTC (5-field cron, always UTC; an interval such as
+# "1h" works too). These are the snapshots that VolSync restores on
+# Kubernetes and that `flux4swarm volume-backup --restore` rolls back to (see
+# examples/nightly-test-clusters). The export then also writes the VolSync
+# objects; the secret store must hold the same restic settings. The
+# Flux4SwarmVolumeSync* alerts in deploy/monitoring cover failing backups.
 version: "3.8"
 services:
   export:
@@ -20,14 +31,23 @@ services:
     command: ["import", "--watch", "--cluster", "prod", "--bootstrap",
       "--git-url", "https://github.com/acme/fleet", "--branch", "main",
       "--git-secret", "flux4swarm-export", "--exclude", "^flux4swarm-export_",
-      "--secret-store-provider", "vault", "--log-format", "json"]
+      "--secret-store-provider", "vault", "--volsync-sync", "0 1 * * *",
+      "--log-format", "json"]
     environment:
       FLUX4SWARM_DEFAULT_NAMESPACE: default
+      # Restic settings of the backups; *_FILE reads them from the secrets.
+      RESTIC_REPOSITORY: s3:https://s3.example.com/backups/swarm-prod
+      RESTIC_PASSWORD_FILE: /run/secrets/flux4swarm-export_restic_password
+      AWS_ACCESS_KEY_ID_FILE: /run/secrets/flux4swarm-export_aws_access_key_id
+      AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/flux4swarm-export_aws_secret_access_key
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     secrets:
       - flux4swarm-export_username
       - flux4swarm-export_password
+      - flux4swarm-export_restic_password
+      - flux4swarm-export_aws_access_key_id
+      - flux4swarm-export_aws_secret_access_key
     deploy:
       replicas: 1
       placement:
@@ -36,4 +56,10 @@ secrets:
   flux4swarm-export_username:
     external: true
   flux4swarm-export_password:
+    external: true
+  flux4swarm-export_restic_password:
+    external: true
+  flux4swarm-export_aws_access_key_id:
+    external: true
+  flux4swarm-export_aws_secret_access_key:
     external: true
