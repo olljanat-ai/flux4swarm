@@ -1,0 +1,105 @@
+# Nightly test Swarm: rebuild it from Git with the newest volume data.
+#
+# Put this file and rebuild.sh (as ci/nightly/rebuild-swarm.sh) into the
+# repository the export writes to, and create a pipeline from it. See
+# README.md next to this file for the whole setup.
+#
+# Library variable group "nightly-test-swarm":
+#   TEST_SWARM_SSH             user@host of a manager of the test Swarm
+#   TEST_SWARM_KNOWN_HOSTS     its line from ~/.ssh/known_hosts
+#   RESTIC_REPOSITORY          the same base repository as the sync services, e.g. s3:https://s3.example.com/bucket/swarm-prod
+#   RESTIC_PASSWORD            (secret)
+#   AWS_ACCESS_KEY_ID          read access to the bucket is enough
+#   AWS_SECRET_ACCESS_KEY      (secret)
+#   AZURE_KEYVAULT_CLIENT_ID   service principal of the SecretStore (--secret-store-provider azurekv)
+#   AZURE_KEYVAULT_CLIENT_SECRET (secret)
+# Secure file "nightly-test-swarm-ssh-key": private key for TEST_SWARM_SSH.
+#
+# The build service reads the repository with System.AccessToken, so no
+# Git token is needed.
+
+trigger: none
+pr: none
+
+schedules:
+  - cron: "0 2 * * 1-5" # UTC
+    displayName: Nightly test Swarm
+    branches:
+      include: [main]
+    always: true # also when nothing was committed since the last run
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: nightly-test-swarm
+  - name: FLUX4SWARM_VERSION
+    value: 0.4.1
+  - name: CLUSTER_PATH
+    value: clusters/nightly-swarm
+  - name: FLEET_URL
+    value: https://dev.azure.com/acme/platform/_git/fleet
+
+jobs:
+  - job: rebuild
+    displayName: Rebuild the test Swarm
+    timeoutInMinutes: 180
+    steps:
+      - checkout: self
+        fetchDepth: 1
+
+      - task: InstallSSHKey@0
+        inputs:
+          knownHostsEntry: $(TEST_SWARM_KNOWN_HOSTS)
+          sshKeySecureFile: nightly-test-swarm-ssh-key
+
+      - bash: |
+          set -euo pipefail
+          cd "$(Agent.TempDirectory)"
+          base=https://github.com/olljanat-ai/flux4swarm/releases/download/v$(FLUX4SWARM_VERSION)
+          tgz=flux4swarm_$(FLUX4SWARM_VERSION)_linux_amd64.tar.gz
+          curl -fsSLO "$base/$tgz" && curl -fsSLO "$base/checksums.txt"
+          sha256sum --ignore-missing -c checksums.txt
+          tar -xzf "$tgz" flux4swarm && sudo install flux4swarm /usr/local/bin/
+          flux4swarm version
+        displayName: Install flux4swarm
+
+      # The Docker socket of the manager, forwarded over SSH, for docker
+      # and flux4swarm alike.
+      - bash: |
+          set -euo pipefail
+          sock="$(Agent.TempDirectory)/docker.sock"
+          ssh -o ExitOnForwardFailure=yes -fNL "$sock:/var/run/docker.sock" "$(TEST_SWARM_SSH)"
+          echo "##vso[task.setvariable variable=DOCKER_HOST]unix://$sock"
+        displayName: Connect to the test Swarm
+
+      - bash: |
+          set -euo pipefail
+          umask 077
+          creds="$(Agent.TempDirectory)/credentials"
+          mkdir -p "$creds/flux-system" "$creds/azure-keyvault"
+          printf build > "$creds/flux-system/username"
+          printf %s "$GIT_TOKEN" > "$creds/flux-system/password"
+          printf %s "$AZURE_KEYVAULT_CLIENT_ID" > "$creds/azure-keyvault/clientId"
+          printf %s "$AZURE_KEYVAULT_CLIENT_SECRET" > "$creds/azure-keyvault/clientSecret"
+          CREDENTIALS_DIR="$creds" ci/nightly/rebuild-swarm.sh
+        displayName: Rebuild with the newest data
+        env:
+          FLEET_URL: $(FLEET_URL)
+          FLEET_BRANCH: main
+          FLEET_COMMIT: $(Build.SourceVersion)
+          CLUSTER_PATH: $(CLUSTER_PATH)
+          # Set to the controller that keeps the test Swarm in sync during
+          # the day, if one runs there (deploy/flux4swarm-stack.yaml).
+          CONTROLLER_SERVICE: flux-system_controller
+          GIT_TOKEN: $(System.AccessToken)
+          RESTIC_REPOSITORY: $(RESTIC_REPOSITORY)
+          RESTIC_PASSWORD: $(RESTIC_PASSWORD)
+          AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+          AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+          AZURE_KEYVAULT_CLIENT_ID: $(AZURE_KEYVAULT_CLIENT_ID)
+          AZURE_KEYVAULT_CLIENT_SECRET: $(AZURE_KEYVAULT_CLIENT_SECRET)
+
+      - bash: docker service ls
+        displayName: Services
+        condition: always()

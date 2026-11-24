@@ -1,0 +1,90 @@
+# Nightly test Swarm: rebuild it from Git with the newest volume data.
+#
+# Put this file into .github/workflows/ and rebuild.sh (as
+# ci/nightly/rebuild-swarm.sh) into the repository the export writes to.
+# See README.md next to this file for the whole setup.
+#
+# Environment "nightly-test-swarm":
+#   variables: TEST_SWARM_SSH (user@host of a manager), RESTIC_REPOSITORY
+#   secrets:   TEST_SWARM_SSH_KEY, TEST_SWARM_KNOWN_HOSTS, RESTIC_PASSWORD,
+#              AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, VAULT_TOKEN
+#              (the token of the SecretStore, --secret-store-provider vault)
+#
+# The job reads the repository with its own GITHUB_TOKEN.
+
+name: nightly-test-swarm
+
+on:
+  schedule:
+    - cron: "0 2 * * 1-5" # UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-test-swarm
+  cancel-in-progress: false
+
+env:
+  FLUX4SWARM_VERSION: 0.4.1
+  CLUSTER_PATH: clusters/nightly-swarm
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment: nightly-test-swarm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install flux4swarm
+        working-directory: ${{ runner.temp }}
+        run: |
+          base=https://github.com/olljanat-ai/flux4swarm/releases/download/v$FLUX4SWARM_VERSION
+          tgz=flux4swarm_${FLUX4SWARM_VERSION}_linux_amd64.tar.gz
+          curl -fsSLO "$base/$tgz" && curl -fsSLO "$base/checksums.txt"
+          sha256sum --ignore-missing -c checksums.txt
+          tar -xzf "$tgz" flux4swarm && sudo install flux4swarm /usr/local/bin/
+          flux4swarm version
+
+      # The Docker socket of the manager, forwarded over SSH, for docker
+      # and flux4swarm alike.
+      - name: Connect to the test Swarm
+        env:
+          SSH_KEY: ${{ secrets.TEST_SWARM_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.TEST_SWARM_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_nightly && chmod 600 ~/.ssh/id_nightly
+          printf '%s\n' "$KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          sock="$RUNNER_TEMP/docker.sock"
+          ssh -i ~/.ssh/id_nightly -o ExitOnForwardFailure=yes -fNL "$sock:/var/run/docker.sock" "${{ vars.TEST_SWARM_SSH }}"
+          echo "DOCKER_HOST=unix://$sock" >> "$GITHUB_ENV"
+
+      - name: Rebuild with the newest data
+        env:
+          FLEET_URL: ${{ github.server_url }}/${{ github.repository }}
+          FLEET_BRANCH: ${{ github.ref_name }}
+          FLEET_COMMIT: ${{ github.sha }}
+          # Set to the controller that keeps the test Swarm in sync during
+          # the day, if one runs there (deploy/flux4swarm-stack.yaml).
+          CONTROLLER_SERVICE: flux-system_controller
+          GIT_TOKEN: ${{ github.token }}
+          VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
+          RESTIC_REPOSITORY: ${{ vars.RESTIC_REPOSITORY }}
+          RESTIC_PASSWORD: ${{ secrets.RESTIC_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          umask 077
+          creds="$RUNNER_TEMP/credentials"
+          mkdir -p "$creds/flux-system" "$creds/vault-token"
+          printf x-access-token > "$creds/flux-system/username"
+          printf %s "$GIT_TOKEN" > "$creds/flux-system/password"
+          printf %s "$VAULT_TOKEN" > "$creds/vault-token/token"
+          CREDENTIALS_DIR="$creds" ci/nightly/rebuild-swarm.sh
+
+      - name: Services
+        if: always()
+        run: docker service ls

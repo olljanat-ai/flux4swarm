@@ -1,0 +1,91 @@
+# Nightly test cluster on Kubernetes: delete yesterday's AKS cluster, create
+# a new one and let Flux build it from the export, restoring the newest
+# volume data before the applications start.
+#
+# Put this file and rebuild.sh (as ci/nightly/rebuild-kubernetes.sh) into the
+# repository the export writes to, and create a pipeline from it. See
+# README.md next to this file for the whole setup.
+#
+# Service connection "nightly-test-cluster": Azure Resource Manager, allowed
+# to manage AKS clusters in AKS_RESOURCE_GROUP.
+# Library variable group "nightly-test-cluster":
+#   FLUX_GIT_TOKEN             (secret) PAT with Code (read) for the repository;
+#                              Flux keeps reading with it during the day
+#   AZURE_KEYVAULT_CLIENT_ID   service principal of the SecretStores (--secret-store-provider azurekv)
+#   AZURE_KEYVAULT_CLIENT_SECRET (secret)
+# The restic settings of the restores come from the secret store, like in
+# production (the *-volsync-restic ExternalSecrets of the export).
+
+trigger: none
+pr: none
+
+schedules:
+  - cron: "0 2 * * 1-5" # UTC
+    displayName: Nightly test cluster
+    branches:
+      include: [main]
+    always: true # also when nothing was committed since the last run
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: nightly-test-cluster
+  - name: CLUSTER_PATH
+    value: clusters/nightly
+  - name: FLUX_VERSION
+    value: 2.10.0
+  - name: AKS_RESOURCE_GROUP
+    value: rg-nightly-test
+  - name: AKS_NAME
+    value: aks-nightly-test
+
+jobs:
+  - job: rebuild
+    displayName: Rebuild the test cluster
+    timeoutInMinutes: 240
+    steps:
+      - checkout: self
+        fetchDepth: 1
+
+      - task: AzureCLI@2
+        displayName: Recreate the AKS cluster
+        inputs:
+          azureSubscription: nightly-test-cluster
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            az aks delete -g "$(AKS_RESOURCE_GROUP)" -n "$(AKS_NAME)" --yes 2>/dev/null || true
+            az aks create -g "$(AKS_RESOURCE_GROUP)" -n "$(AKS_NAME)" \
+              --node-count 2 --node-vm-size Standard_D4s_v5 \
+              --enable-managed-identity --generate-ssh-keys
+            az aks get-credentials -g "$(AKS_RESOURCE_GROUP)" -n "$(AKS_NAME)" --overwrite-existing
+
+      - bash: |
+          set -euo pipefail
+          curl -fsSL https://fluxcd.io/install.sh | sudo FLUX_VERSION="$(FLUX_VERSION)" bash
+          flux version --client
+        displayName: Install the Flux CLI
+
+      - bash: |
+          set -euo pipefail
+          umask 077
+          store="$(Agent.TempDirectory)/store-credentials"
+          mkdir -p "$store/azure-keyvault"
+          printf %s "$AZURE_KEYVAULT_CLIENT_ID" > "$store/azure-keyvault/clientId"
+          printf %s "$AZURE_KEYVAULT_CLIENT_SECRET" > "$store/azure-keyvault/clientSecret"
+          STORE_CREDENTIALS_DIR="$store" ci/nightly/rebuild-kubernetes.sh
+        displayName: Bootstrap Flux and restore the newest data
+        env:
+          CLUSTER_PATH: $(CLUSTER_PATH)
+          GIT_USERNAME: flux
+          GIT_PASSWORD: $(FLUX_GIT_TOKEN)
+          AZURE_KEYVAULT_CLIENT_ID: $(AZURE_KEYVAULT_CLIENT_ID)
+          AZURE_KEYVAULT_CLIENT_SECRET: $(AZURE_KEYVAULT_CLIENT_SECRET)
+
+      - bash: |
+          flux get all -A
+          kubectl get pods -A
+        displayName: Status
+        condition: always()
