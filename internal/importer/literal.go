@@ -87,17 +87,6 @@ func needsLiteral(s string) bool {
 			return false // CR, other control chars, BOM, ...
 		}
 	}
-	// The first non-empty line decides the block's indentation; leading
-	// whitespace there would need an explicit indentation indicator.
-	for _, l := range strings.Split(s, "\n") {
-		if l == "" {
-			continue
-		}
-		if l[0] == ' ' || l[0] == '\t' {
-			return false
-		}
-		break
-	}
 	if strings.TrimRight(s, "\n") == "" {
 		return false
 	}
@@ -144,7 +133,20 @@ func expandLiterals(doc string, lits []string) string {
 		case strings.HasSuffix(s, "\n"):
 			chomp = ""
 		}
-		sb.WriteString(head + "|" + chomp + "\n")
+		// The first non-empty line normally sets the block's indentation.
+		// When it starts with whitespace (indented JSON, a leading blank
+		// line with spaces) say the indentation explicitly instead.
+		// The indicator counts from the parent node's indentation: the key
+		// for "key: |", the "-" for a bare sequence entry.
+		ind := ""
+		if leadingSpace(s) {
+			base := col
+			if strings.HasSuffix(head, "- ") {
+				base -= 2
+			}
+			ind = strconv.Itoa(len(indent) - base)
+		}
+		sb.WriteString(head + "|" + ind + chomp + "\n")
 		content := s
 		if chomp != "-" {
 			content = strings.TrimSuffix(s, "\n")
@@ -161,4 +163,16 @@ func expandLiterals(doc string, lits []string) string {
 		return ""
 	}
 	return sb.String()
+}
+
+// leadingSpace reports whether the first non-empty line of s starts with a
+// space or tab, which a literal block can only hold with an explicit
+// indentation indicator.
+func leadingSpace(s string) bool {
+	for _, l := range strings.Split(s, "\n") {
+		if l != "" {
+			return l[0] == ' ' || l[0] == '\t'
+		}
+	}
+	return false
 }
