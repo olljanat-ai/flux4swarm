@@ -43,6 +43,8 @@ complete mapping.
 | **Continuous import** | `flux4swarm import --watch` | Keep the Swarm as the source of truth (teams keep using `docker stack deploy`) and commit every change to Git, so Flux keeps a Kubernetes cluster in sync while the platform team adds Kubernetes-only features on top. |
 | **GitOps** | `flux4swarm controller` (loop) / `flux4swarm reconcile` (one pass) | Pull the repository, build it like Flux's kustomize-controller, apply it to Swarm, prune what was removed and wait for services to converge. |
 | **Volume data** | `flux4swarm volume-backup` / `import --volsync-sync` | Copy Swarm volumes (any volume driver) to restic repositories that VolSync restores into the matching PersistentVolumeClaims, once or continuously while the services keep running on Swarm. |
+| **Kubernetes import** | `flux4swarm kube-import` | Export what was deployed to a Kubernetes cluster without Flux (kubectl, Helm, operators) as Flux manifests, once or continuously (`--watch`), to bring it under GitOps, keep a versioned Git backup, or rebuild it on another cluster or a Swarm. |
+| **Kubernetes volume backup** | `flux4swarm kube-backup` | Back up PersistentVolumeClaims with VolSync to restic, once or on a schedule, so another cluster restores them (`kube-import --volsync`), for disaster recovery or a move between clusters. |
 | **Service-by-service cutover** | `flux4swarm import --watch --migrate` | Move one labelled service at a time: stop it on Swarm, copy the last data increment, hand it to Kubernetes in Git, and keep it stopped on Swarm until you roll it back. |
 
 A typical migration: import once with `--bootstrap`, review the commit,
@@ -318,6 +320,103 @@ flux4swarm controller --default-namespace team-a --config clusters/prod/flux-sys
 Stacks keep mapping to the namespace of the same name. Don't pick a default
 namespace that is also a stack name on that Swarm, because both would then
 share one Kubernetes namespace.
+
+## Import and back up a Kubernetes cluster
+
+Clusters that were set up by hand (`kubectl apply`, `helm install`) can be
+brought into the same Git layout, backed up, and moved to another cluster.
+`kube-import` reads the cluster of your kubeconfig (`--kubeconfig`,
+`--context`, `KUBECONFIG` or in-cluster) and writes one directory per
+namespace to `clusters/<cluster>/apps`, to `--output` or straight to Git:
+
+```sh
+flux4swarm kube-import --cluster prod --bootstrap --git-url https://github.com/acme/fleet \
+  --secret-store-provider vault --secret-values ./prod-secrets.json
+```
+
+- **Only what is not in Git yet.** Objects Flux applied, objects with an
+  owner (ReplicaSets, Pods, Jobs of CronJobs, Secrets of ExternalSecrets,
+  cert-manager certificates), runtime objects (Events, Endpoints, Leases, the
+  `default` ServiceAccount, `kube-root-ca.crt`) and the system namespaces
+  (`kube-*`, `flux-system`, `volsync-system`) are skipped, and each skip is
+  printed. `--namespace` picks namespaces (system ones too, when named),
+  `--exclude` takes a regular expression on `namespace/Kind/name`,
+  `--include-flux-managed` keeps Flux's objects, and `--cluster-scoped` adds
+  ClusterRoles, ClusterRoleBindings, CRDs, StorageClasses, IngressClasses,
+  PriorityClasses, GatewayClasses, ClusterIssuers and ClusterSecretStores to
+  `apps/_cluster`.
+- **Portable manifests.** Everything the cluster fills in (uid,
+  resourceVersion, managedFields, status, last-applied-configuration,
+  clusterIP, allocated nodePorts, a claim's volumeName and binding
+  annotations, Job selectors) is removed, so the export applies to an empty
+  cluster and `--watch` commits only real changes. `--storage-class
+  local-path=managed-csi` renames storage classes for a target with other
+  storage.
+- **No secret values in Git.** Every Secret becomes an ExternalSecret with
+  one store key per value, `<prefix><namespace>-<secret>-<key>`, keeping
+  its type (`kubernetes.io/tls`, `dockerconfigjson`, ...), labels and
+  annotations; binary values use `decodingStrategy: Base64`.
+  `--secret-values FILE` writes the current values, by store key, to a local
+  JSON file (mode 0600) for loading into Vault or Key Vault; delete it
+  afterwards.
+- **Helm releases** are exported as the manifests Helm rendered, and a note
+  names each release and chart so you can turn it into a HelmRelease.
+- **Keep a Git backup.** `kube-import --watch --interval 10m` exports again
+  every interval and commits only what changed, with a commit message that
+  says what changed, so the Git history is an audit log of hand-made
+  changes.
+
+The export is the repository format Flux4Swarm already uses, so Flux on
+another Kubernetes cluster applies it as it is, and `flux4swarm controller`
+deploys its Deployments, Services, ConfigMaps and claims to a Swarm (the
+Kubernetes-only kinds are skipped with a warning).
+
+### Back up volume data and move it to another cluster
+
+`kube-backup` creates a VolSync ReplicationSource (restic mover) and its
+repository Secret for each claim on the source cluster (VolSync must be
+installed there). Each claim goes to its own repository,
+`<RESTIC_REPOSITORY>/<namespace>/<claim>`, the same layout as
+`volume-backup` on Swarm, so the ReplicationDestinations that `kube-import
+--volsync` writes restore it on the target cluster, and `volume-backup
+--restore` into the Swarm volume of the same stack and name:
+
+```sh
+export RESTIC_REPOSITORY=s3:https://s3.example.com/backups/k8s-prod RESTIC_PASSWORD=... AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+flux4swarm kube-backup --all                       # one backup of every bound claim now, waits for it
+flux4swarm kube-backup shop/data --schedule 1h     # keep backing up in the cluster, incrementally
+flux4swarm kube-backup --all --schedule "0 1 * * *" --keep 7 --copy-method Snapshot   # nightly CSI snapshots, a week kept
+flux4swarm kube-backup --all --delete              # stop: remove the ReplicationSources (the data stays)
+```
+
+`--copy-method Direct` (default) reads the claim as it is and works on any
+storage; `Snapshot` or `Clone` take a point-in-time copy of a claim in use
+and need a CSI driver (`--volume-snapshot-class`). The restic settings come
+from the environment or from `<NAME>_FILE` files, like `volume-backup`.
+
+To move everything to a new cluster with the data:
+
+```sh
+# 1. Pre-seed while the old cluster runs (repeat or --schedule for large volumes)
+flux4swarm kube-backup --all
+# 2. Stop the workloads that mount the claims and take the last increment
+flux4swarm kube-backup --all --final
+# 3. Export the old cluster for the new one: restore every claim first, then start the apps
+flux4swarm kube-import --cluster new --bootstrap --volsync-restore-first \
+  --git-url https://github.com/acme/fleet --storage-class gp2=managed-csi
+# 4. Store the base repository, password and credentials under the volsync-* keys
+#    of the secret store, then flux bootstrap the new cluster on clusters/new
+```
+
+`--final` scales the Deployments and StatefulSets that mount the claims to 0
+and records their replica counts in the annotation
+`flux4swarm.io/stopped-replicas`; `kube-import` exports those counts, so the
+new cluster starts them as they ran. With `--volsync-restore-first` Flux applies the
+claims and their one-off restores from `clusters/new/data` first and starts
+`apps/` only once every claim is restored. For a warm standby instead,
+`kube-import --volsync --volsync-schedule "0 * * * *"` keeps restoring into
+the target's claims while its workloads that mount one are held (0
+replicas, Jobs and CronJobs suspended).
 
 ## Run the GitOps controller
 

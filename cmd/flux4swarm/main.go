@@ -151,7 +151,7 @@ func newRoot() *cobra.Command {
 	root.PersistentFlags().StringVar(&g.namespace, "default-namespace", envOr(api.EnvSwarmNamespace, api.SwarmNamespace),
 		"Kubernetes namespace of Swarm objects without a stack (e.g. made with docker service create): import puts them there and reconcile deploys it without a stack prefix (env "+api.EnvSwarmNamespace+")")
 	root.AddCommand(newControllerCmd(modeController), newControllerCmd(modeReconcile), newControllerCmd(modeDiff),
-		newImportCmd(), newReportCmd(), newVolumeBackupCmd(), newMergeCmd(), newGetCmd(), newSuspendCmd(true), newSuspendCmd(false), newVersionCmd())
+		newImportCmd(), newKubeImportCmd(), newKubeBackupCmd(), newReportCmd(), newVolumeBackupCmd(), newMergeCmd(), newGetCmd(), newSuspendCmd(true), newSuspendCmd(false), newVersionCmd())
 	return root
 }
 

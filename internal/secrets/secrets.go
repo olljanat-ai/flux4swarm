@@ -7,6 +7,7 @@ package secrets
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -115,6 +116,13 @@ func (r *Resolver) Resolve(ctx context.Context, externals []*api.ExternalSecret,
 			v, err := p.Get(ctx, d.RemoteRef)
 			if err != nil {
 				return nil, fmt.Errorf("ExternalSecret %s: key %q: %w", es.Metadata.NamespacedName(), d.RemoteRef.Key, err)
+			}
+			if strings.EqualFold(d.RemoteRef.DecodingStrategy, "Base64") {
+				dec, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(v)))
+				if err != nil {
+					return nil, fmt.Errorf("ExternalSecret %s: key %q: decodingStrategy Base64: %w", es.Metadata.NamespacedName(), d.RemoteRef.Key, err)
+				}
+				v = dec
 			}
 			sec.Data[d.SecretKey] = v
 		}
