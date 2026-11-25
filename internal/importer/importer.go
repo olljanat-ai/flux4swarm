@@ -185,6 +185,10 @@ type Result struct {
 	// Report is the Kubernetes migration readiness report, also written
 	// to <root>/MIGRATION.md.
 	Report *Report
+	// SecretValues are, for a Kubernetes export with
+	// KubeOptions.SecretValues, the secret values by store key. They are
+	// never part of Files.
+	SecretValues map[string]string
 }
 
 // Skipped is a Swarm object that was not exported.
@@ -294,10 +298,26 @@ type exporter struct {
 	pvcs                        map[string]*corev1.PersistentVolumeClaim
 	services                    []reportService
 	entryPoints, tlsEntryPoints []string
+	// namespaces are the Namespace objects read from Kubernetes, written
+	// instead of a bare one; kube is set for a Kubernetes export.
+	namespaces map[string]any
+	kube       bool
+	pvcsKube   []string
 }
 
 // Export reads the Swarm and renders the manifests.
 func Export(ctx context.Context, c Client, o Options) (*Result, error) {
+	e, err := newExporter(o)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.run(ctx, c); err != nil {
+		return nil, err
+	}
+	return e.res, nil
+}
+
+func newExporter(o Options) (*exporter, error) {
 	if err := o.defaults(); err != nil {
 		return nil, err
 	}
@@ -317,15 +337,13 @@ func Export(ctx context.Context, c Client, o Options) (*Result, error) {
 		volsyncKeys:     map[string][]string{},
 		secretEnv:       o.secretEnvPatterns(),
 		pvcs:            map[string]*corev1.PersistentVolumeClaim{},
+		namespaces:      map[string]any{},
 	}
 	e.res.Clean = []string{o.Path + "/" + AppsDir}
 	if o.VolSyncRestoreFirst {
 		e.res.Clean = append(e.res.Clean, o.Path+"/"+DataDir)
 	}
-	if err := e.run(ctx, c); err != nil {
-		return nil, err
-	}
-	return e.res, nil
+	return e, nil
 }
 
 func (e *exporter) add(file string, obj any) {
@@ -1247,7 +1265,9 @@ func (e *exporter) write() error {
 	clusterStoreWritten := false
 	for _, ns := range nss {
 		dir := e.nsDir(ns)
-		if ns != "default" {
+		if n, ok := e.namespaces[ns]; ok && ns != "default" {
+			e.add(dir+"/namespace.yaml", n)
+		} else if ns != "default" {
 			e.add(dir+"/namespace.yaml", &corev1.Namespace{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
 				ObjectMeta: metav1.ObjectMeta{Name: ns}})
 		}
@@ -1269,7 +1289,9 @@ func (e *exporter) write() error {
 			}
 		}
 	}
-	if len(e.extSecrets) > 0 {
+	if len(e.extSecrets) > 0 && e.kube {
+		e.note("%d Secret(s) exported as ExternalSecrets, one store key per value (remoteRef.key); the values stay out of Git. Load them into the %s store before Flux applies the export (--secret-values writes them to a local file for that).", len(e.extSecrets), e.o.SecretStoreProvider)
+	} else if len(e.extSecrets) > 0 {
 		e.note("%d secret(s) exported as ExternalSecrets. Docker does not return secret values: store each value in the %s store under its remoteRef.key and fill in the SecretStore.", len(e.extSecrets), e.o.SecretStoreProvider)
 	}
 	if len(e.set.HTTPRoutes) > 0 {

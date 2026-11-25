@@ -69,6 +69,10 @@ const (
 	// hold for Kubernetes only: Kubernetes does not start it until it is
 	// cut over, while Swarm keeps running it.
 	AnnotationHeldJob = "flux4swarm.io/held-job"
+	// AnnotationStoppedReplicas on a Kubernetes workload records the
+	// replicas it had before `flux4swarm kube-backup --final` scaled it to
+	// 0 for the last backup; kube-import exports that count.
+	AnnotationStoppedReplicas = "flux4swarm.io/stopped-replicas"
 	// AnnotationForce is Flux's per-object force annotation: Flux
 	// recreates the object when a change to an immutable field (a Job's
 	// pod template) cannot be applied.
@@ -310,8 +314,11 @@ type ExternalSecretTarget struct {
 // for the created secret.
 type ExternalSecretTemplate struct {
 	EngineVersion string `json:"engineVersion,omitempty"`
-	Metadata      struct {
-		Labels map[string]string `json:"labels,omitempty"`
+	// Type is the type of the created Secret (kubernetes.io/tls, ...).
+	Type     string `json:"type,omitempty"`
+	Metadata struct {
+		Labels      map[string]string `json:"labels,omitempty"`
+		Annotations map[string]string `json:"annotations,omitempty"`
 	} `json:"metadata,omitempty"`
 	Data map[string]string `json:"data,omitempty"`
 }
@@ -327,6 +334,9 @@ type RemoteReference struct {
 	Key      string `json:"key"`
 	Property string `json:"property,omitempty"`
 	Version  string `json:"version,omitempty"`
+	// DecodingStrategy "Base64" means the store holds the value base64
+	// encoded (binary Kubernetes Secret values exported by kube-import).
+	DecodingStrategy string `json:"decodingStrategy,omitempty"`
 }
 
 // SecretStore (or ClusterSecretStore) configures access to a secret backend.

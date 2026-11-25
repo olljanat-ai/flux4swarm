@@ -147,6 +147,13 @@ func (e *exporter) volsync(ns, name string) {
 	if e.o.VolSyncRestoreFirst || e.o.VolSyncCutover {
 		hold = ""
 	}
+	if e.kube {
+		if hold != "" {
+			hold = " Workloads that mount a claim are held on Kubernetes (Deployments and StatefulSets at 0 replicas, annotation " + api.AnnotationHeld + " keeps the count; Jobs and CronJobs suspended), so this cluster is a standby whose data follows the backups."
+		}
+		e.notes = appendOnce(e.notes, "Every PersistentVolumeClaim has a VolSync ReplicationDestination that restores the newest restic snapshot written by `flux4swarm kube-backup` on the source cluster; store the base repository, password and credentials under the "+e.o.SecretKeyPrefix+VolSyncRemoteKey+"* keys of the secret store."+hold)
+		return
+	}
 	e.notes = appendOnce(e.notes, "Every PersistentVolumeClaim has a VolSync ReplicationDestination that restores the newest restic snapshot written by `flux4swarm volume-backup`; store the base repository, password and credentials under the "+e.o.SecretKeyPrefix+VolSyncRemoteKey+"* keys of the secret store."+hold)
 }
 
